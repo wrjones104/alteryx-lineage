@@ -3,11 +3,12 @@ from sqlite3 import Error
 import os
 import streamlit as st
 import json
+import pandas as pd
+from collections import deque
 
 DB_FILE = os.path.join("data", "lineage.db")
 CONNECTIONS_FILE = os.path.join("data", "connections.json")
 
-# --- NEW: Functions to manage saved server connections ---
 def load_connections():
     """Loads saved server connection details from a JSON file."""
     if not os.path.exists(CONNECTIONS_FILE):
@@ -34,7 +35,6 @@ def save_connection(conn_name, url, client_id, client_secret):
     except IOError:
         return False
 
-# ... (The rest of the file is unchanged) ...
 def create_connection():
     conn = None
     try:
@@ -89,7 +89,6 @@ def create_tables():
 
 @st.cache_data(ttl=5)
 def get_all_workspaces():
-    print("Fetching workspaces from DB...")
     conn = create_connection()
     if conn is not None:
         try:
@@ -117,6 +116,58 @@ def _get_or_create_workspace_id(conn, workspace_name):
         cursor.execute("INSERT INTO workspaces (name) VALUES (?)", (workspace_name,))
         conn.commit()
         return cursor.lastrowid
+
+def get_upstream_tool_ids(conn, workflow_db_id, tool_db_id):
+    """Finds the database IDs of tools connected to the input of a given tool."""
+    tool_xml_id_df = pd.read_sql_query("SELECT tool_id_xml FROM tools WHERE id = ?", conn, params=(tool_db_id,))
+    if tool_xml_id_df.empty:
+        return []
+    tool_xml_id = tool_xml_id_df.iloc[0]['tool_id_xml']
+    
+    upstream_xml_ids_df = pd.read_sql_query(
+        "SELECT origin_tool_id_xml FROM connections WHERE workflow_id = ? AND destination_tool_id_xml = ?",
+        conn,
+        params=(workflow_db_id, tool_xml_id)
+    )
+    if upstream_xml_ids_df.empty:
+        return []
+    
+    upstream_xml_ids = upstream_xml_ids_df['origin_tool_id_xml'].tolist()
+    if not upstream_xml_ids:
+        return []
+
+    placeholders = ','.join('?' for _ in upstream_xml_ids)
+    query = f"SELECT id FROM tools WHERE workflow_id = ? AND tool_id_xml IN ({placeholders})"
+    
+    params = [workflow_db_id]
+    params.extend(upstream_xml_ids)
+    
+    upstream_db_ids_df = pd.read_sql_query(query, conn, params=tuple(params))
+    
+    return upstream_db_ids_df['id'].tolist()
+
+def find_upstream_fields_for_tool(conn, workflow_db_id, start_tool_db_id):
+    """Iteratively looks upstream from a tool to find the first ancestor(s) with a field schema."""
+    queue = deque([start_tool_db_id])
+    visited = set()
+    
+    while queue:
+        current_tool_id = queue.popleft()
+        if current_tool_id in visited:
+            continue
+        visited.add(current_tool_id)
+        
+        fields_df = pd.read_sql_query("SELECT field_name FROM tool_fields WHERE tool_id = ? ORDER BY field_name", conn, params=(current_tool_id,))
+        if not fields_df.empty:
+            return fields_df
+
+        upstream_ids = get_upstream_tool_ids(conn, workflow_db_id, current_tool_id)
+        for up_id in upstream_ids:
+            if up_id not in visited:
+                queue.append(up_id)
+                
+    return pd.DataFrame()
+
 
 def log_workflow_details(workspace_name, workflow_name, tools_list, connections_list):
     conn = create_connection()
@@ -161,3 +212,56 @@ def log_workflow_details(workspace_name, workflow_name, tools_list, connections_
         print(f"Database error in log_workflow_details: {e}")
     finally:
         if conn: conn.close()
+
+def get_workflows_in_workspace(workspace_name):
+    """Retrieves all workflows for a given workspace."""
+    conn = create_connection()
+    if conn is None:
+        return pd.DataFrame()
+    try:
+        query = """
+            SELECT w.id, w.workflow_name, w.last_parsed_at
+            FROM workflows w
+            JOIN workspaces ws ON w.workspace_id = ws.id
+            WHERE ws.name = ?
+            ORDER BY w.workflow_name;
+        """
+        df = pd.read_sql_query(query, conn, params=(workspace_name,))
+        return df
+    except Error as e:
+        print(f"Database error in get_workflows_in_workspace: {e}")
+        return pd.DataFrame()
+    finally:
+        if conn:
+            conn.close()
+
+def delete_workflow(workflow_id):
+    """Deletes a workflow and all its associated tools, fields, and connections."""
+    conn = create_connection()
+    if conn is None:
+        return False
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM tools WHERE workflow_id = ?", (workflow_id,))
+        tool_ids = [row[0] for row in cursor.fetchall()]
+        
+        if tool_ids:
+            placeholders = ','.join('?' for _ in tool_ids)
+            cursor.execute(f"DELETE FROM tool_fields WHERE tool_id IN ({placeholders})", tool_ids)
+        
+        cursor.execute("DELETE FROM connections WHERE workflow_id = ?", (workflow_id,))
+        
+        cursor.execute("DELETE FROM tools WHERE workflow_id = ?", (workflow_id,))
+        
+        cursor.execute("DELETE FROM workflows WHERE id = ?", (workflow_id,))
+        
+        conn.commit()
+        return True
+    except Error as e:
+        print(f"Database error in delete_workflow: {e}")
+        conn.rollback()
+        return False
+    finally:
+        if conn:
+            conn.close()
+

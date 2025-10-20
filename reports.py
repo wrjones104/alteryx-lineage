@@ -8,8 +8,17 @@ def get_raw_io_list(workspace_name):
     if conn is None: return []
     
     try:
+        # Pass the tool's database primary key as tool_db_id
         query = """
-            SELECT w.workflow_name, t.tool_id_xml as id, t.plugin, t.macro, t.config_xml, t.annotation
+            SELECT 
+                w.id as workflow_db_id, 
+                w.workflow_name, 
+                t.id as tool_db_id, 
+                t.tool_id_xml, 
+                t.plugin, 
+                t.macro, 
+                t.config_xml, 
+                t.annotation
             FROM tools t
             JOIN workflows w ON t.workflow_id = w.id
             JOIN workspaces ws ON w.workspace_id = ws.id
@@ -22,17 +31,21 @@ def get_raw_io_list(workspace_name):
     if tools_df.empty: return []
 
     io_list = []
-    for workflow_name, group in tools_df.groupby('workflow_name'):
-        tools_list = group.to_dict('records')
-        inputs, outputs = extract_io_tools(tools_list)
-        for i in inputs:
-            i['workflow_name'] = workflow_name
-            i['io_type'] = 'input'
-            io_list.append(i)
-        for o in outputs:
-            o['workflow_name'] = workflow_name
-            o['io_type'] = 'output'
-            io_list.append(o)
+    tools_list_for_parser = tools_df.to_dict('records')
+    inputs, outputs = extract_io_tools(tools_list_for_parser)
+    
+    # Re-join with tool_id_xml for display purposes
+    tool_id_map = tools_df.set_index('tool_db_id')['tool_id_xml'].to_dict()
+
+    for i in inputs:
+        i['io_type'] = 'input'
+        i['tool_id'] = tool_id_map.get(i['tool_db_id'])
+        io_list.append(i)
+    for o in outputs:
+        o['io_type'] = 'output'
+        o['tool_id'] = tool_id_map.get(o['tool_db_id'])
+        io_list.append(o)
+        
     return io_list
 
 def generate_impact_report(raw_io_list, view_by='Data Source'):
@@ -59,9 +72,15 @@ def generate_impact_report(raw_io_list, view_by='Data Source'):
     report_df['ConsumingWorkflows'] = report_df['ConsumingWorkflows'].apply(lambda d: d if isinstance(d, list) else [])
 
     if view_by == 'Workflow':
+        # Helper function to flatten lists of lists and get unique values
+        def flatten_and_unique(series_of_lists):
+            flat_list = [item for sublist in series_of_lists if isinstance(sublist, list) for item in sublist]
+            return list(pd.Series(flat_list).unique())
+
         workflow_view = report_df[report_df['Producing Workflow'] != 'External Source'].groupby('Producing Workflow').agg(
             UniqueOutputs=('Data Source', 'nunique'),
-            TotalDownstreamConsumers=('NumberOfConsumers', 'sum')
+            TotalDownstreamConsumers=('NumberOfConsumers', 'sum'),
+            DownstreamConsumers=('ConsumingWorkflows', flatten_and_unique)
         ).reset_index()
         workflow_view = workflow_view.sort_values(by='TotalDownstreamConsumers', ascending=False).reset_index(drop=True)
         return workflow_view.rename(columns={'Producing Workflow': 'Workflow'})

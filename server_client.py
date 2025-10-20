@@ -2,11 +2,13 @@ import os
 import zipfile
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
+from dotenv import load_dotenv
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+load_dotenv()
 
-def get_access_token(base_url, client_id, client_secret):
-    """Authenticates with the Alteryx Server API to get a bearer token."""
+def get_session_key(base_url, client_id, client_secret):
+    """Authenticates with the Alteryx Server API to get a session key."""
     token_url = f"{base_url}/webapi/oauth2/token"
     payload = {'grant_type': 'client_credentials', 'client_id': client_id, 'client_secret': client_secret}
     try:
@@ -14,12 +16,39 @@ def get_access_token(base_url, client_id, client_secret):
         response.raise_for_status()
         return response.json().get('access_token')
     except requests.exceptions.RequestException as e:
-        print(f"Error getting access token: {e}")
+        print(f"Error getting session key: {e}")
         return None
 
-def get_workflows(base_url, access_token):
+def get_user_map(base_url):
+    """Fetches all users from the server using admin credentials and returns a dict mapping user ID to full name."""
+    admin_client_id = os.getenv("ADMIN_CLIENT_ID")
+    admin_client_secret = os.getenv("ADMIN_CLIENT_SECRET")
+    if not all([admin_client_id, admin_client_secret]):
+        print("Admin credentials not found in .env file. Cannot fetch user names.")
+        return {}
+    
+    admin_s_key = get_session_key(base_url, admin_client_id, admin_client_secret)
+    if not admin_s_key:
+        print("Failed to get admin session key.")
+        return {}
+
+    users_url = f"{base_url}/webapi/v3/users"
+    headers = {'Authorization': f'Bearer {admin_s_key}'}
+    try:
+        response = requests.get(users_url, headers=headers, verify=False)
+        response.raise_for_status()
+        users_list = response.json()
+        user_map = {user['id']: f"{user.get('firstName', '')} {user.get('lastName', '')}".strip() for user in users_list}
+        return user_map
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to retrieve users: {e}")
+        return {}
+
+
+def get_workflows(base_url, session_key):
     """Fetches all workflows accessible to the user, including extra metadata."""
-    headers = {'Authorization': f'Bearer {access_token}'}
+    user_map = get_user_map(base_url)
+    headers = {'Authorization': f'Bearer {session_key}'}
     workflows_url = f"{base_url}/webapi/v3/workflows"
     
     try:
@@ -34,10 +63,11 @@ def get_workflows(base_url, access_token):
         for wf in workflows_list:
             date_str = wf.get('dateCreated', 'N/A')
             friendly_date = date_str.split('T')[0] if 'T' in date_str else date_str
+            owner_id = wf.get('ownerId', 'N/A')
             detailed_workflows.append({
                 'id': wf.get('id'),
                 'name': wf.get('name'),
-                'ownerId': wf.get('ownerId', 'N/A'),
+                'ownerName': user_map.get(owner_id, owner_id), # Use name from map, fallback to ID
                 'dateCreated': friendly_date,
                 'publishedVersionNumber': wf.get('publishedVersionNumber', 'N/A')
             })
@@ -49,13 +79,12 @@ def get_workflows(base_url, access_token):
         print(f"Failed to retrieve workflows: {e}")
         return []
 
-def download_and_unpack_workflow(base_url, access_token, workflow_id, download_dir):
+def download_and_unpack_workflow(base_url, session_key, workflow_id, download_dir):
     """
     Downloads a packaged workflow (.yxzp), unpacks it, and returns the path to the .yxmd file.
-    --- THIS VERSION KEEPS THE FINAL .yxmd FILE FOR DEBUGGING ---
     """
     download_url = f"{base_url}/webapi/v3/workflows/{workflow_id}/package"
-    headers = {'Authorization': f'Bearer {access_token}'}
+    headers = {'Authorization': f'Bearer {session_key}'}
     yxzp_path = os.path.join(download_dir, f"{workflow_id}.yxzp")
     unpacked_path = None
     
@@ -75,9 +104,8 @@ def download_and_unpack_workflow(base_url, access_token, workflow_id, download_d
                     unpacked_path = os.path.join(download_dir, file_info.filename)
                     break
         
-        # --- CHANGE: We no longer delete the unpacked .yxmd file ---
         if yxzp_path and os.path.exists(yxzp_path):
-            os.remove(yxzp_path) # Still clean up the temporary zip file
+            os.remove(yxzp_path)
 
         return unpacked_path
 
@@ -86,3 +114,4 @@ def download_and_unpack_workflow(base_url, access_token, workflow_id, download_d
         if os.path.exists(yxzp_path):
             os.remove(yxzp_path)
         return None
+

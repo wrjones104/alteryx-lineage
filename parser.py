@@ -8,7 +8,6 @@ def parse_workflow(workflow_path):
     field schema for each tool. Handles both file paths and file-like objects.
     """
     try:
-        # lxml's ET.parse handles both file paths and in-memory file objects correctly.
         tree = ET.parse(workflow_path)
         root = tree.getroot()
     except Exception as e:
@@ -43,7 +42,6 @@ def parse_workflow(workflow_path):
             macro_path = engine_settings.get('Macro')
 
         output_fields = []
-        # This universal search finds all RecordInfo tags, which is the most robust method.
         for record_info_node in node.findall('.//RecordInfo'):
             for field_node in record_info_node.findall('Field'):
                 output_fields.append({
@@ -55,7 +53,7 @@ def parse_workflow(workflow_path):
                 })
 
         tools.append({
-            'id': tool_id,
+            'id': tool_id, # This remains the XML ToolID
             'plugin': plugin,
             'macro': macro_path,
             'config_xml': config_xml_string,
@@ -93,26 +91,38 @@ def extract_io_tools(tools_list):
     INPUT_PLUGINS = ['DbFileInput', 'Download', 'SalesforceInput', 'Directory', 'DynamicInput']
     OUTPUT_PLUGINS = ['DbFileOutput', 'Upload', 'SalesforceOutput']
     for tool in tools_list:
+        # Use the unique database ID (tool_db_id) as the primary identifier
+        io_base = {
+            'tool_db_id': tool['tool_db_id'], 
+            'workflow_db_id': tool.get('workflow_db_id'),
+            'workflow_name': tool.get('workflow_name')
+        }
         macro = tool.get('macro') or ''
         if 'Input Data Selector.yxmc' in macro:
             try:
                 config_root = ET.fromstring(tool['config_xml'])
                 value_node = config_root.find(".//Value[@name='Drop Down (5)']")
                 if value_node is not None and value_node.text:
-                    inputs.append({'tool_id': tool['id'], 'plugin': 'Input Data Selector (Macro)', 'source_detail': value_node.text})
+                    item = {**io_base, 'plugin': 'Input Data Selector (Macro)', 'source_detail': value_node.text}
+                    inputs.append(item)
                 continue
             except (ET.ParseError, TypeError): continue
+        
         manual_lineage = parse_annotation(tool.get('annotation', ''))
         if manual_lineage:
             if 'inputs' in manual_lineage and manual_lineage['inputs']:
-                for item in manual_lineage['inputs']:
-                    inputs.append({'tool_id': tool['id'], 'plugin': 'Manual Annotation', 'source_detail': f"{item.get('type', 'N/A')}: {item.get('path', 'N/A')}"})
+                for i in manual_lineage['inputs']:
+                    item = {**io_base, 'plugin': 'Manual Annotation', 'source_detail': f"{i.get('type', 'N/A')}: {i.get('path', 'N/A')}"}
+                    inputs.append(item)
             if 'outputs' in manual_lineage and manual_lineage['outputs']:
-                for item in manual_lineage['outputs']:
-                     outputs.append({'tool_id': tool['id'], 'plugin': 'Manual Annotation', 'source_detail': f"{item.get('type', 'N/A')}: {item.get('path', 'N/A')}"})
+                for o in manual_lineage['outputs']:
+                     item = {**io_base, 'plugin': 'Manual Annotation', 'source_detail': f"{o.get('type', 'N/A')}: {o.get('path', 'N/A')}"}
+                     outputs.append(item)
             continue
+
         is_input = any(plugin in tool['plugin'] for plugin in INPUT_PLUGINS)
         is_output = any(plugin in tool['plugin'] for plugin in OUTPUT_PLUGINS)
+
         if (is_input or is_output) and tool['config_xml']:
             try:
                 config_root = ET.fromstring(tool['config_xml'])
@@ -128,7 +138,8 @@ def extract_io_tools(tools_list):
                 if 'DynamicInput' in tool['plugin']:
                      template_node = config_root.find('.//InputConfiguration/Configuration/File')
                      if template_node is not None: source_detail = f"Dynamic from template: {template_node.get('value')}"
-                io_item = {'tool_id': tool['id'], 'plugin': tool['plugin'].split('.')[-1], 'source_detail': source_detail}
+                
+                io_item = {**io_base, 'plugin': tool['plugin'].split('.')[-1], 'source_detail': source_detail}
                 if is_input: inputs.append(io_item)
                 else: outputs.append(io_item)
             except (ET.ParseError, TypeError): continue

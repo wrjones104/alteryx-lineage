@@ -1,0 +1,13 @@
+# Python bytecode files
+__pycache__/
+*.pyc
+
+# Local database file
+lineage.db
+
+# Configuration/credentials file
+connections.json
+
+# Environment variables
+.env
+.venv/

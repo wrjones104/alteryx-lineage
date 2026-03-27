@@ -5,9 +5,48 @@ import streamlit as st
 import json
 import pandas as pd
 from collections import deque
+from cryptography.fernet import Fernet
+from dotenv import load_dotenv
+import base64
+
+load_dotenv()
 
 DB_FILE = os.path.join("data", "lineage.db")
 CONNECTIONS_FILE = os.path.join("data", "connections.json")
+
+def _get_cipher():
+    key = os.getenv("ENCRYPTION_KEY")
+    if not key:
+        # Generate a new key if none exists. In a production environment, this should be explicitly set.
+        key = Fernet.generate_key().decode()
+        print(f"WARNING: No ENCRYPTION_KEY found in environment. Generating a temporary one: {key}")
+        print("Please add ENCRYPTION_KEY to your .env file to ensure credentials can be decrypted after restart.")
+        os.environ["ENCRYPTION_KEY"] = key
+
+    try:
+        return Fernet(key.encode())
+    except ValueError:
+        # If the provided key is invalid, generate a new one
+        new_key = Fernet.generate_key().decode()
+        print(f"WARNING: Invalid ENCRYPTION_KEY. Generating a temporary one: {new_key}")
+        os.environ["ENCRYPTION_KEY"] = new_key
+        return Fernet(new_key.encode())
+
+def encrypt_secret(secret):
+    if not secret:
+        return secret
+    cipher = _get_cipher()
+    return cipher.encrypt(secret.encode()).decode()
+
+def decrypt_secret(encrypted_secret):
+    if not encrypted_secret:
+        return encrypted_secret
+    try:
+        cipher = _get_cipher()
+        return cipher.decrypt(encrypted_secret.encode()).decode()
+    except Exception as e:
+        print(f"Error decrypting secret: {e}")
+        return None
 
 def load_connections():
     """Loads saved server connection details from a JSON file."""
@@ -15,17 +54,29 @@ def load_connections():
         return {}
     try:
         with open(CONNECTIONS_FILE, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            # Decrypt secrets for each connection
+            for conn_name, details in data.items():
+                if 'client_secret' in details:
+                    details['client_secret'] = decrypt_secret(details['client_secret'])
+            return data
     except (IOError, json.JSONDecodeError):
         return {}
 
 def save_connection(conn_name, url, client_id, client_secret):
     """Saves a new or updated server connection to the JSON file."""
-    connections = load_connections()
+    connections = {}
+    if os.path.exists(CONNECTIONS_FILE):
+        try:
+            with open(CONNECTIONS_FILE, 'r') as f:
+                connections = json.load(f)
+        except (IOError, json.JSONDecodeError):
+            pass
+
     connections[conn_name] = {
         'url': url,
         'client_id': client_id,
-        'client_secret': client_secret
+        'client_secret': encrypt_secret(client_secret)
     }
     try:
         os.makedirs(os.path.dirname(CONNECTIONS_FILE), exist_ok=True)

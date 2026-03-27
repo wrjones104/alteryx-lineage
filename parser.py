@@ -2,13 +2,16 @@ from lxml import etree as ET
 import yaml
 import re
 
+# Use a secure parser by default to prevent XXE attacks
+SECURE_PARSER = ET.XMLParser(resolve_entities=False, no_network=True)
+
 def parse_workflow(workflow_path):
     """
     Parses an Alteryx .yxmd file to extract all tools, connections, and the output
     field schema for each tool. Handles both file paths and file-like objects.
     """
     try:
-        tree = ET.parse(workflow_path)
+        tree = ET.parse(workflow_path, parser=SECURE_PARSER)
         root = tree.getroot()
     except Exception as e:
         print(f"Error parsing XML: {e}")
@@ -100,7 +103,7 @@ def extract_io_tools(tools_list):
         macro = tool.get('macro') or ''
         if 'Input Data Selector.yxmc' in macro:
             try:
-                config_root = ET.fromstring(tool['config_xml'])
+                config_root = ET.fromstring(tool['config_xml'].encode('utf-8') if isinstance(tool['config_xml'], str) else tool['config_xml'], parser=SECURE_PARSER)
                 value_node = config_root.find(".//Value[@name='Drop Down (5)']")
                 if value_node is not None and value_node.text:
                     item = {**io_base, 'plugin': 'Input Data Selector (Macro)', 'source_detail': value_node.text}
@@ -125,7 +128,7 @@ def extract_io_tools(tools_list):
 
         if (is_input or is_output) and tool['config_xml']:
             try:
-                config_root = ET.fromstring(tool['config_xml'])
+                config_root = ET.fromstring(tool['config_xml'].encode('utf-8') if isinstance(tool['config_xml'], str) else tool['config_xml'], parser=SECURE_PARSER)
                 source_detail = "Not Found"
                 file_node = config_root.find('.//File')
                 if file_node is not None: source_detail = file_node.get('value') or file_node.text

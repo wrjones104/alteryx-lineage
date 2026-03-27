@@ -68,9 +68,25 @@ A web application built with Python and Streamlit to parse Alteryx workflows, st
 
 4.  **Run the application:**
     ```bash
-    streamlit run app.py
+    streamlit run Home.py
     ```
     Your web browser should automatically open the application.
+
+### Internal Certificates (Optional)
+If your organization uses self-signed certificates or internal Certificate Authorities (CAs) and you encounter SSL errors when connecting to the Alteryx Server, you can set the `REQUESTS_CA_BUNDLE` environment variable to point to your custom CA bundle file. You can do this by adding it to a `.env` file in the root directory:
+```
+REQUESTS_CA_BUNDLE=/path/to/your/ca-bundle.crt
+```
+
+### Server Credentials Encryption
+When connecting to the Alteryx Server, your `client_secret` is saved locally to allow easy reconnection in future sessions. To prevent saving credentials in plaintext, they are encrypted at rest using the `cryptography` library. For this to persist correctly, you should provide an encryption key via the `ENCRYPTION_KEY` environment variable in your `.env` file. You can generate a random secure key by running the following Python command:
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+And add it to your `.env` file:
+```bash
+ENCRYPTION_KEY=your-generated-key
+```
 
 ---
 

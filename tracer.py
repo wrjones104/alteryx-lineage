@@ -6,6 +6,9 @@ from database_manager import create_connection
 import os
 import streamlit as st
 
+# Use a secure parser by default to prevent XXE attacks
+SECURE_PARSER = ET.XMLParser(resolve_entities=False, no_network=True)
+
 def find_origin_field_name(config_xml, plugin, target_field_name):
     """
     Parses a tool's config to find the original name of a field before this tool transformed it.
@@ -18,7 +21,7 @@ def find_origin_field_name(config_xml, plugin, target_field_name):
         return target_field_name
 
     try:
-        config_root = ET.fromstring(config_xml)
+        config_root = ET.fromstring(config_xml.encode('utf-8') if isinstance(config_xml, str) else config_xml, parser=SECURE_PARSER)
         
         if 'Formula' in plugin:
             for field in config_root.findall(".//FormulaField"):
@@ -62,7 +65,7 @@ def find_destination_field_name(config_xml, plugin, origin_field_name):
         return origin_field_name
         
     try:
-        config_root = ET.fromstring(config_xml)
+        config_root = ET.fromstring(config_xml.encode('utf-8') if isinstance(config_xml, str) else config_xml, parser=SECURE_PARSER)
 
         if 'DynamicRename' in plugin:
             rename_mode_node = config_root.find('.//RenameMode')

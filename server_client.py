@@ -1,18 +1,23 @@
 import os
 import zipfile
 import requests
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
 
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 load_dotenv()
+
+def get_verify_option():
+    """Returns the custom CA bundle path if set, otherwise True."""
+    ca_bundle = os.getenv("REQUESTS_CA_BUNDLE")
+    if ca_bundle and os.path.exists(ca_bundle):
+        return ca_bundle
+    return True
 
 def get_session_key(base_url, client_id, client_secret):
     """Authenticates with the Alteryx Server API to get a session key."""
     token_url = f"{base_url}/webapi/oauth2/token"
     payload = {'grant_type': 'client_credentials', 'client_id': client_id, 'client_secret': client_secret}
     try:
-        response = requests.post(token_url, data=payload, verify=False)
+        response = requests.post(token_url, data=payload, verify=get_verify_option())
         response.raise_for_status()
         return response.json().get('access_token')
     except requests.exceptions.RequestException as e:
@@ -35,7 +40,7 @@ def get_user_map(base_url):
     users_url = f"{base_url}/webapi/v3/users"
     headers = {'Authorization': f'Bearer {admin_s_key}'}
     try:
-        response = requests.get(users_url, headers=headers, verify=False)
+        response = requests.get(users_url, headers=headers, verify=get_verify_option())
         response.raise_for_status()
         users_list = response.json()
         user_map = {user['id']: f"{user.get('firstName', '')} {user.get('lastName', '')}".strip() for user in users_list}
@@ -52,7 +57,7 @@ def get_workflows(base_url, session_key):
     workflows_url = f"{base_url}/webapi/v3/workflows"
     
     try:
-        response = requests.get(workflows_url, headers=headers, verify=False)
+        response = requests.get(workflows_url, headers=headers, verify=get_verify_option())
         response.raise_for_status()
         workflows_list = response.json()
         if not isinstance(workflows_list, list):
@@ -91,7 +96,7 @@ def download_and_unpack_workflow(base_url, session_key, workflow_id, download_di
     try:
         os.makedirs(download_dir, exist_ok=True)
         
-        with requests.get(download_url, headers=headers, stream=True, verify=False) as r:
+        with requests.get(download_url, headers=headers, stream=True, verify=get_verify_option()) as r:
             r.raise_for_status()
             with open(yxzp_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):

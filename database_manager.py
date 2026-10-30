@@ -10,7 +10,8 @@ from collections import deque
 DB_FILE = os.path.join("data", "lineage.db")
 CONNECTIONS_FILE = os.path.join("data", "connections.json")
 KEYRING_SERVICE = "alteryx-lineage"
-WORKFLOW_META_COLUMNS = ('source', 'source_ref', 'owner', 'description', 'author', 'alteryx_version')
+WORKFLOW_META_COLUMNS = ('source', 'source_ref', 'owner', 'description', 'author', 'alteryx_version',
+                         'server_version', 'server_url')
 
 # The credential store is optional, and its backends raise more than KeyringError
 # (the Windows one raises pywintypes.error, a plain Exception, e.g. under a service account).
@@ -375,6 +376,25 @@ def get_workflows_in_workspace(workspace_name):
     finally:
         if conn:
             conn.close()
+
+def get_server_workflows_in_workspace(workspace_name):
+    """The workspace's workflows that came from a server, with the server version each was downloaded at."""
+    conn = create_connection()
+    if conn is None:
+        return pd.DataFrame()
+    try:
+        return pd.read_sql_query("""
+            SELECT w.id, w.workflow_name, w.server_workflow_id, w.server_version, w.server_url,
+                   w.source, w.source_ref, w.owner, w.last_parsed_at
+            FROM workflows w JOIN workspaces ws ON w.workspace_id = ws.id
+            WHERE ws.name = ? AND w.server_workflow_id IS NOT NULL
+            ORDER BY w.workflow_name
+        """, conn, params=(workspace_name,))
+    except Error as e:
+        print(f"Database error in get_server_workflows_in_workspace: {e}")
+        return pd.DataFrame()
+    finally:
+        conn.close()
 
 def delete_workflow(workflow_id):
     """Deletes a workflow and all its associated tools, fields, and connections."""

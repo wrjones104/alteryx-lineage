@@ -3,6 +3,7 @@ import pandas as pd
 from parser import parse_workflow
 import database_manager as db
 import server_client
+import server_sync
 import gc
 import time
 import os
@@ -105,6 +106,47 @@ with st.expander("🔗 Connect to Alteryx Server to Download Workflows"):
             else:
                 st.warning("Please provide a name and fill in all credential fields to save.")
 
+# Workspace Update Check: workflows downloaded earlier whose published version has changed since
+if st.session_state.get('session_key') and not st.session_state.get('workflows_to_download'):
+    st.markdown("---")
+    st.subheader("Check Workspace for Server Updates")
+    status_df = server_sync.compare_with_server(db.get_server_workflows_in_workspace(st.session_state.workspace),
+                                                st.session_state.get('gallery_workflows'), st.session_state.server_url)
+    if status_df.empty:
+        st.info("No workflows in this workspace have been downloaded from a server yet.")
+    elif not st.session_state.get('gallery_workflows'):
+        st.warning("The server returned no workflows, so the workspace can't be checked. Try reconnecting.")
+    else:
+        counts = status_df['Status'].value_counts()
+        st.caption(" · ".join(f"{status}: {counts[status]}" for status in counts.index))
+        st.dataframe(status_df.drop(columns=['server_workflow_id']), hide_index=True, use_container_width=True)
+        if counts.get(server_sync.STATUS_MISSING):
+            st.caption(f"'{server_sync.STATUS_MISSING}': deleted from the server, or not shared with this connection's account.")
+
+        downloadable = status_df[status_df['Status'].isin(server_sync.DOWNLOADABLE)]
+        id_by_name = dict(zip(downloadable['Workflow'], downloadable['server_workflow_id']))
+        u_col1, u_col2 = st.columns([4, 1])
+        with u_col1:
+            to_update = st.multiselect(
+                "Workflows to update", options=list(id_by_name),
+                default=list(downloadable.loc[downloadable['Status'] == server_sync.STATUS_UPDATE, 'Workflow']),
+                help=f"'{server_sync.STATUS_UNKNOWN}' rows were downloaded before versions were recorded, "
+                     "or were replaced by a local upload. Re-download them to record the current version.")
+        with u_col2:
+            st.write("")
+            if st.button("Re-check Server"):
+                # Picks up versions published since you connected
+                st.session_state.gallery_workflows = server_client.get_workflows(st.session_state.server_url, st.session_state.session_key)
+                if st.session_state.gallery_workflows:
+                    df = pd.DataFrame(st.session_state.gallery_workflows)
+                    df['Select'] = False
+                    st.session_state.workflow_df = df
+                st.rerun()
+        if st.button(f"Download Updates ({len(to_update)})", disabled=not to_update, type="primary"):
+            st.session_state.workflows_to_download = [id_by_name[name] for name in to_update]
+            st.session_state.cancel_download = False
+            st.rerun()
+
 # Server Workflow Download Table
 if st.session_state.get('session_key') and 'workflow_df' in st.session_state and not st.session_state.workflow_df.empty:
     st.markdown("---")
@@ -184,6 +226,9 @@ if st.session_state.get('workflows_to_download'):
                             'source': 'Alteryx Server',
                             'source_ref': f"{workflow_name} (id {wf_id}, v{server_row['publishedVersionNumber']}) on {st.session_state.server_url}",
                             'owner': server_row['ownerName'],
+                            # Kept so the workspace can be checked for newer published versions later
+                            'server_version': server_sync.version_text(server_row['publishedVersionNumber']),
+                            'server_url': server_sync.normalize_url(st.session_state.server_url),
                         })
                         file_name = os.path.basename(yxmd_path)
                         stored_name = db.log_workflow_details(st.session_state.workspace, file_name, tools_list, connections_list,
@@ -237,6 +282,8 @@ if st.button("Process Local Files", disabled=not uploaded_files):
             failed_files.append(uploaded_file.name)
             continue
         workflow_meta['source'] = 'Local Upload'
+        # If this replaces a server download, its contents no longer match any server version
+        workflow_meta['server_version'] = None
         if db.log_workflow_details(st.session_state.workspace, uploaded_file.name, tools_list, connections_list, workflow_meta) is None:
             failed_files.append(uploaded_file.name)
         del tools_list, connections_list

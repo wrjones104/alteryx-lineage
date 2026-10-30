@@ -1,0 +1,108 @@
+<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput"><Position x="54" y="54" /></GuiSettings>
+      <Properties>
+        <Configuration><File OutputFileName="" FileFormat="0">\\srv\sales\customers.csv</File></Configuration>
+        <MetaInfo connection="Output">
+          <RecordInfo>
+            <Field name="CustomerID" type="V_String" />
+            <Field name="Name" type="V_String" />
+            <Field name="Region" type="V_String" />
+          </RecordInfo>
+        </MetaInfo>
+      </Properties>
+    </Node>
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput"><Position x="54" y="150" /></GuiSettings>
+      <Properties>
+        <Configuration><File OutputFileName="" FileFormat="0">\\srv\sales\orders.csv</File></Configuration>
+        <MetaInfo connection="Output">
+          <RecordInfo>
+            <Field name="CustomerID" type="V_String" />
+            <Field name="Amount" type="Double" />
+            <Field name="OrderDate" type="Date" />
+          </RecordInfo>
+        </MetaInfo>
+      </Properties>
+    </Node>
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join"><Position x="150" y="100" /></GuiSettings>
+      <Properties>
+        <Configuration joinByRecordPos="False">
+          <JoinInfo connection="Left"><Field field="CustomerID" /></JoinInfo>
+          <JoinInfo connection="Right"><Field field="CustomerID" /></JoinInfo>
+          <SelectConfiguration>
+            <Configuration outputConnection="Join">
+              <OrderChanged value="False" />
+              <SelectFields>
+                <SelectField field="Right_CustomerID" selected="True" rename="Order_CustomerID" />
+                <SelectField field="Right_OrderDate" selected="False" />
+                <SelectField field="*Unknown" selected="True" />
+              </SelectFields>
+            </Configuration>
+          </SelectConfiguration>
+        </Configuration>
+        <MetaInfo connection="Join">
+          <RecordInfo>
+            <Field name="CustomerID" type="V_String" />
+            <Field name="Name" type="V_String" />
+            <Field name="Region" type="V_String" />
+            <Field name="Order_CustomerID" type="V_String" />
+            <Field name="Amount" type="Double" />
+          </RecordInfo>
+        </MetaInfo>
+      </Properties>
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Union.Union"><Position x="250" y="100" /></GuiSettings>
+      <Properties>
+        <Configuration><Mode>ByName</Mode></Configuration>
+        <MetaInfo connection="Output">
+          <RecordInfo>
+            <Field name="CustomerID" type="V_String" />
+            <Field name="Name" type="V_String" />
+            <Field name="Region" type="V_String" />
+            <Field name="Order_CustomerID" type="V_String" />
+            <Field name="Amount" type="Double" />
+          </RecordInfo>
+        </MetaInfo>
+      </Properties>
+    </Node>
+    <Node ToolID="5">
+      <GuiSettings><Position x="150" y="250" /></GuiSettings>
+      <Properties>
+        <Configuration><Value name="Drop Down (5)">\\srv\sales\more_orders.csv</Value></Configuration>
+        <MetaInfo connection="Output">
+          <RecordInfo>
+            <Field name="CustomerID" type="V_String" />
+            <Field name="Amount" type="Double" />
+          </RecordInfo>
+        </MetaInfo>
+      </Properties>
+      <EngineSettings Macro="Input Data Selector.yxmc" />
+    </Node>
+    <Node ToolID="6">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput"><Position x="350" y="100" /></GuiSettings>
+      <Properties>
+        <Configuration><File MaxRecords="" FileFormat="0">\\srv\sales\combined.csv</File></Configuration>
+      </Properties>
+    </Node>
+    <Node ToolID="7">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput"><Position x="250" y="200" /></GuiSettings>
+      <Properties>
+        <Configuration><File MaxRecords="" FileFormat="0">\\srv\sales\unmatched_orders.csv</File></Configuration>
+      </Properties>
+    </Node>
+  </Nodes>
+  <Connections>
+    <Connection><Origin ToolID="1" Connection="Output" /><Destination ToolID="3" Connection="Left" /></Connection>
+    <Connection><Origin ToolID="2" Connection="Output" /><Destination ToolID="3" Connection="Right" /></Connection>
+    <Connection name="#1"><Origin ToolID="3" Connection="Join" /><Destination ToolID="4" Connection="Input" /></Connection>
+    <Connection name="#2"><Origin ToolID="5" Connection="Output" /><Destination ToolID="4" Connection="Input" /></Connection>
+    <Connection><Origin ToolID="4" Connection="Output" /><Destination ToolID="6" Connection="Input" /></Connection>
+    <Connection><Origin ToolID="3" Connection="Right" /><Destination ToolID="7" Connection="Input" /></Connection>
+  </Connections>
+  <Properties><MetaInfo><Name>Join_Union</Name></MetaInfo></Properties>
+</AlteryxDocument>

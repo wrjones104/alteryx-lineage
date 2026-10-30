@@ -10,11 +10,16 @@ et_xmlfile==2.0.0
 gitdb==4.0.12
 GitPython==3.1.45
 idna==3.10
+jaraco.classes==3.4.0
+jaraco.context==6.1.2
+jaraco.functools==4.6.0
 Jinja2==3.1.6
-jsonschema==4.25.0
 jsonschema-specifications==2025.4.1
+jsonschema==4.25.0
+keyring==25.7.0
 lxml==6.0.0
 MarkupSafe==3.0.2
+more-itertools==11.2.1
 narwhals==2.0.1
 numpy==2.2.6
 openpyxl==3.1.5
@@ -25,7 +30,9 @@ protobuf==6.31.1
 pyarrow==21.0.0
 pydeck==0.9.1
 python-dateutil==2.9.0.post0
+python-dotenv==1.2.4
 pytz==2025.2
+pywin32-ctypes==0.2.3; sys_platform == "win32"
 PyYAML==6.0.2
 referencing==0.36.2
 requests==2.32.4
@@ -36,8 +43,8 @@ streamlit==1.48.0
 tenacity==9.1.2
 toml==0.10.2
 tornado==6.5.2
+truststore==0.10.5
 typing_extensions==4.14.1
 tzdata==2025.2
 urllib3==2.5.0
 watchdog==6.0.0
-python-dotenv==1.2.4

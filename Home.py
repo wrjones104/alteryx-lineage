@@ -90,8 +90,14 @@ with st.expander("🔗 Connect to Alteryx Server to Download Workflows"):
         save_conn_name = st.text_input("Save connection as:")
         if st.button("Save Current Connection"):
             if save_conn_name and st.session_state.get('server_url') and st.session_state.get('client_id') and st.session_state.get('client_secret'):
-                db.save_connection(save_conn_name, st.session_state.server_url, st.session_state.client_id, st.session_state.client_secret)
-                st.success(f"Connection '{save_conn_name}' saved!")
+                saved, secret_stored = db.save_connection(save_conn_name, st.session_state.server_url, st.session_state.client_id, st.session_state.client_secret)
+                if not saved:
+                    st.error(f"Could not save connection '{save_conn_name}'.")
+                elif secret_stored:
+                    st.success(f"Connection '{save_conn_name}' saved! The client secret is kept in your system's credential store.")
+                else:
+                    st.warning(f"Connection '{save_conn_name}' saved without its client secret (no system credential store "
+                               "is available). You'll need to enter the secret each time.")
             else:
                 st.warning("Please provide a name and fill in all credential fields to save.")
 
@@ -153,7 +159,7 @@ if st.session_state.get('workflows_to_download'):
     total_files = len(workflow_ids)
     progress_bar = st.progress(0, "Starting...")
     temp_dir = "temp_downloads"
-    failed_files = []
+    failed_files, renamed_files = [], []
     try:
         for i, wf_id in enumerate(workflow_ids):
             if st.session_state.get('cancel_download'):
@@ -174,7 +180,13 @@ if st.session_state.get('workflows_to_download'):
                         'source_ref': f"{workflow_name} (id {wf_id}, v{server_row['publishedVersionNumber']}) on {st.session_state.server_url}",
                         'owner': server_row['ownerName'],
                     })
-                    db.log_workflow_details(st.session_state.workspace, os.path.basename(yxmd_path), tools_list, connections_list, workflow_meta)
+                    file_name = os.path.basename(yxmd_path)
+                    stored_name = db.log_workflow_details(st.session_state.workspace, file_name, tools_list, connections_list,
+                                                          workflow_meta, server_workflow_id=wf_id)
+                    if stored_name is None:
+                        failed_files.append(workflow_name)
+                    elif stored_name != file_name:
+                        renamed_files.append(f"'{workflow_name}' saved as '{stored_name}'")
                 os.remove(yxmd_path)
                 del tools_list, connections_list
                 gc.collect()
@@ -182,6 +194,10 @@ if st.session_state.get('workflows_to_download'):
                 failed_files.append(workflow_name)
         if failed_files:
             st.error(f"Could not download or parse {len(failed_files)} workflow(s): {', '.join(failed_files)}")
+        if renamed_files:
+            st.warning("Another workflow in this workspace already uses the same file name, so these were saved "
+                       f"under a unique name: {'; '.join(renamed_files)}")
+        if failed_files or renamed_files:
             time.sleep(5)
         if not st.session_state.get('cancel_download'):
             progress_bar.progress(1.0, "Processing complete!")
@@ -214,7 +230,8 @@ if st.button("Process Local Files", disabled=not uploaded_files):
             failed_files.append(uploaded_file.name)
             continue
         workflow_meta['source'] = 'Local Upload'
-        db.log_workflow_details(st.session_state.workspace, uploaded_file.name, tools_list, connections_list, workflow_meta)
+        if db.log_workflow_details(st.session_state.workspace, uploaded_file.name, tools_list, connections_list, workflow_meta) is None:
+            failed_files.append(uploaded_file.name)
         del tools_list, connections_list
         gc.collect()
 

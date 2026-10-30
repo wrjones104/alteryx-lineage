@@ -30,6 +30,9 @@ FLAG_LOCAL_DRIVE = 'Local C: drive (may only exist on the machine that ran it)'
 FLAG_LISTING = 'Directory listing only (reads file names, not contents)'
 REVIEW_FLAGS = {FLAG_NOT_FOUND, FLAG_DYNAMIC, FLAG_MULTI_FILE, FLAG_RELATIVE, FLAG_CONSTANT, FLAG_LOCAL_DRIVE}
 
+# Workflow files are uploaded by users: never expand entities or fetch anything over the network.
+SAFE_XML_PARSER = ET.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+
 PLACEHOLDER_SOURCES = {'', 'not found', 'unknown', 'n/a', 'none'}
 _DB_PREFIXES = ('aka:', 'odbc:', 'oledb:', 'oci:', 'sqlncli', 'snowbl:', 'simba', 'dsn=')
 _PATH_PATTERN = re.compile(r'(?:[A-Za-z]:\\|\\\\[\w.$-]+\\)[^"\'<>|\r\n\t]*')
@@ -42,7 +45,7 @@ def parse_workflow(workflow_path):
     and file-like objects. Returns (None, None, None) if the file cannot be parsed.
     """
     try:
-        tree = ET.parse(workflow_path)
+        tree = ET.parse(workflow_path, parser=SAFE_XML_PARSER)
         root = tree.getroot()
     except Exception as e:
         print(f"Error parsing XML: {e}")
@@ -103,7 +106,10 @@ def parse_workflow(workflow_path):
             dest_tool_id = dest_node.get('ToolID')
             connections.append({
                 'origin_id': origin_tool_id,
-                'destination_id': dest_tool_id
+                'destination_id': dest_tool_id,
+                # Anchor names, e.g. a Join's 'Left'/'Right' inputs and 'Join'/'Left'/'Right' outputs
+                'origin_anchor': origin_node.get('Connection'),
+                'destination_anchor': dest_node.get('Connection'),
             })
 
     workflow_meta = {

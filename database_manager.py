@@ -3,15 +3,33 @@ from sqlite3 import Error
 import os
 import streamlit as st
 import json
+import keyring
+from keyring.errors import KeyringError
 import pandas as pd
 from collections import deque
 
 DB_FILE = os.path.join("data", "lineage.db")
 CONNECTIONS_FILE = os.path.join("data", "connections.json")
+KEYRING_SERVICE = "alteryx-lineage"
 WORKFLOW_META_COLUMNS = ('source', 'source_ref', 'owner', 'description', 'author', 'alteryx_version')
 
-def load_connections():
-    """Loads saved server connection details from a JSON file."""
+def _store_secret(conn_name, client_secret):
+    """Stores a client secret in the OS credential store (Windows Credential Manager). Returns success."""
+    try:
+        keyring.set_password(KEYRING_SERVICE, conn_name, client_secret)
+        return True
+    except KeyringError as e:
+        print(f"Could not store secret for '{conn_name}' in the credential store: {e}")
+        return False
+
+def _read_secret(conn_name):
+    try:
+        return keyring.get_password(KEYRING_SERVICE, conn_name) or ''
+    except KeyringError as e:
+        print(f"Could not read secret for '{conn_name}' from the credential store: {e}")
+        return ''
+
+def _read_connections_file():
     if not os.path.exists(CONNECTIONS_FILE):
         return {}
     try:
@@ -20,14 +38,7 @@ def load_connections():
     except (IOError, json.JSONDecodeError):
         return {}
 
-def save_connection(conn_name, url, client_id, client_secret):
-    """Saves a new or updated server connection to the JSON file."""
-    connections = load_connections()
-    connections[conn_name] = {
-        'url': url,
-        'client_id': client_id,
-        'client_secret': client_secret
-    }
+def _write_connections_file(connections):
     try:
         os.makedirs(os.path.dirname(CONNECTIONS_FILE), exist_ok=True)
         with open(CONNECTIONS_FILE, 'w') as f:
@@ -35,6 +46,32 @@ def save_connection(conn_name, url, client_id, client_secret):
         return True
     except IOError:
         return False
+
+def load_connections():
+    """
+    Loads saved server connections. The JSON file holds only the URL and client ID; secrets live in
+    the OS credential store. Secrets saved in plain text by older versions are moved there on load.
+    """
+    connections = _read_connections_file()
+    migrated = False
+    for conn_name, details in connections.items():
+        if details.get('client_secret') and _store_secret(conn_name, details['client_secret']):
+            del details['client_secret']
+            migrated = True
+    if migrated:
+        _write_connections_file(connections)
+    return {name: {**details, 'client_secret': details.get('client_secret') or _read_secret(name)}
+            for name, details in connections.items()}
+
+def save_connection(conn_name, url, client_id, client_secret):
+    """
+    Saves a new or updated server connection. Returns (saved, secret_stored): if the OS credential
+    store is unavailable, the URL and client ID are still saved but the secret is not.
+    """
+    connections = _read_connections_file()
+    connections[conn_name] = {'url': url, 'client_id': client_id}
+    secret_stored = _store_secret(conn_name, client_secret)
+    return _write_connections_file(connections), secret_stored
 
 def create_connection():
     conn = None
@@ -89,10 +126,16 @@ def create_tables():
             );
         """)
         # Columns added after the first release; existing databases are migrated in place.
-        existing_columns = {row[1] for row in cursor.execute("PRAGMA table_info(workflows)")}
-        for column in WORKFLOW_META_COLUMNS:
-            if column not in existing_columns:
-                cursor.execute(f"ALTER TABLE workflows ADD COLUMN {column} TEXT")
+        added_columns = {
+            'workflows': WORKFLOW_META_COLUMNS + ('server_workflow_id',),
+            'connections': ('origin_anchor', 'destination_anchor'),
+        }
+        for table, columns in added_columns.items():
+            existing_columns = {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+            for column in columns:
+                if column not in existing_columns:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflows_server_id ON workflows (workspace_id, server_workflow_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tools_workflow ON tools (workflow_id, tool_id_xml)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tool_fields_tool ON tool_fields (tool_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_connections_origin ON connections (workflow_id, origin_tool_id_xml)")
@@ -222,21 +265,47 @@ def save_path_aliases(workspace_name, aliases):
     finally:
         conn.close()
 
-def log_workflow_details(workspace_name, workflow_name, tools_list, connections_list, workflow_meta=None):
+def _upsert_workflow(cursor, workspace_id, workflow_name, server_workflow_id):
+    """
+    Finds or creates the workflow row and returns (workflow_db_id, stored_name).
+    Server workflows are matched by their server ID, so two different server workflows that share a
+    file name (e.g. 'Workflow.yxmd') are kept apart; the second gets its ID appended to its name.
+    Local uploads have no ID and are matched by file name, as before.
+    """
+    workflow_db_id = None
+    if server_workflow_id:
+        row = cursor.execute("SELECT id FROM workflows WHERE workspace_id = ? AND server_workflow_id = ?",
+                             (workspace_id, server_workflow_id)).fetchone()
+        workflow_db_id = row[0] if row else None
+    same_name = cursor.execute("SELECT id, server_workflow_id FROM workflows WHERE workspace_id = ? AND workflow_name = ?",
+                               (workspace_id, workflow_name)).fetchone()
+    # A same-named row with no server ID is this workflow parsed before IDs were tracked (or a local upload)
+    if workflow_db_id is None and same_name and (not server_workflow_id or same_name[1] in (None, server_workflow_id)):
+        workflow_db_id = same_name[0]
+    stored_name = workflow_name
+    if same_name and same_name[0] != workflow_db_id:
+        stored_name = f"{workflow_name} [{server_workflow_id}]"
+
+    if workflow_db_id is None:
+        cursor.execute(
+            "INSERT INTO workflows (workspace_id, workflow_name, last_parsed_at, server_workflow_id) VALUES (?, ?, datetime('now'), ?)",
+            (workspace_id, stored_name, server_workflow_id)
+        )
+        return cursor.lastrowid, stored_name
+    cursor.execute(
+        "UPDATE workflows SET workflow_name = ?, last_parsed_at = datetime('now'), server_workflow_id = COALESCE(?, server_workflow_id) WHERE id = ?",
+        (stored_name, server_workflow_id, workflow_db_id)
+    )
+    return workflow_db_id, stored_name
+
+def log_workflow_details(workspace_name, workflow_name, tools_list, connections_list, workflow_meta=None, server_workflow_id=None):
+    """Saves a parsed workflow, replacing any earlier parse of it. Returns the name it was stored under, or None on error."""
     conn = create_connection()
-    if conn is None: return
+    if conn is None: return None
     try:
         cursor = conn.cursor()
         workspace_id = _get_or_create_workspace_id(conn, workspace_name)
-        cursor.execute(
-            "INSERT OR IGNORE INTO workflows (workspace_id, workflow_name, last_parsed_at) VALUES (?, ?, datetime('now'))",
-            (workspace_id, workflow_name)
-        )
-        cursor.execute(
-            "UPDATE workflows SET last_parsed_at = datetime('now') WHERE workspace_id = ? AND workflow_name = ?",
-            (workspace_id, workflow_name)
-        )
-        workflow_db_id = cursor.execute("SELECT id FROM workflows WHERE workspace_id = ? AND workflow_name = ?", (workspace_id, workflow_name)).fetchone()[0]
+        workflow_db_id, stored_name = _upsert_workflow(cursor, workspace_id, workflow_name, server_workflow_id)
         # Only overwrite metadata we were given, so a local re-upload keeps the server owner, etc.
         meta = {k: v for k, v in (workflow_meta or {}).items() if k in WORKFLOW_META_COLUMNS and v is not None}
         if meta:
@@ -262,12 +331,15 @@ def log_workflow_details(workspace_name, workflow_name, tools_list, connections_
                     )
         for conn_data in connections_list:
             cursor.execute(
-                "INSERT INTO connections (workflow_id, origin_tool_id_xml, destination_tool_id_xml) VALUES (?, ?, ?)",
-                (workflow_db_id, conn_data['origin_id'], conn_data['destination_id'])
+                "INSERT INTO connections (workflow_id, origin_tool_id_xml, destination_tool_id_xml, origin_anchor, destination_anchor) VALUES (?, ?, ?, ?, ?)",
+                (workflow_db_id, conn_data['origin_id'], conn_data['destination_id'], conn_data.get('origin_anchor'), conn_data.get('destination_anchor'))
             )
         conn.commit()
+        return stored_name
     except Error as e:
         print(f"Database error in log_workflow_details: {e}")
+        conn.rollback()
+        return None
     finally:
         if conn: conn.close()
 

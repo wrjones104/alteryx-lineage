@@ -79,6 +79,11 @@ A web application built with Python and Streamlit to parse Alteryx workflows, st
     ```
     Your web browser should automatically open the application.
 
+### Server connections and security
+
+* **Certificates:** Alteryx Server certificates are checked against your computer's certificate store, so a server signed by an internal company CA works without extra setup. To trust a specific CA file instead, add `REQUESTS_CA_BUNDLE=C:\path\to\ca.pem` to a `.env` file. Only as a last resort (for example, an expired internal certificate), `ALTERYX_SSL_VERIFY=false` turns checking off.
+* **Saved secrets:** "Save Current Connection" keeps the client secret in Windows Credential Manager (or the macOS Keychain), not in `data/connections.json`. Secrets saved in plain text by older versions are moved there automatically the next time the app loads them.
+
 ---
 
 ## 📖 Usage Guide
@@ -86,7 +91,9 @@ A web application built with Python and Streamlit to parse Alteryx workflows, st
 1.  **Select a Workspace:** Upon launching, use the sidebar to either create a new workspace or select an existing one.
 2.  **Add Workflows:**
     * **From Server:** Expand the "Connect to Server" section, enter your credentials (or load a saved connection), and click "Connect". A table of accessible workflows will appear in the main window. Use the checkboxes to select workflows and then click "Download & Process Selected".
-    * **From Local:** Use the "Upload Local Workflows" uploader to select one or more `.yxmd` files from your computer. They will be processed automatically.
+    * **From Local:** Use the "Upload Local Workflows" uploader to select one or more `.yxmd` or `.yxwz` files from your computer. They will be processed automatically.
+    * Server workflows are tracked by their server ID, so two server workflows with the same file name stay separate (the second gets its ID added to its name). Local uploads are matched by file name, so uploading a file with the same name replaces the earlier one.
+    * Re-process workflows that were loaded before this version so that Join/Union field tracing can use their connection details.
 3.  **Analyze:**
     * Use the pages in the sidebar to switch between the **Impact Analysis**, **Field Lineage Explorer**, **I/O Catalog**, and other views to explore your workflow data.
 4.  **Catalog:** On the **I/O Catalog** page, add your drive mappings first (for example `S:` → `\\fileserver\finance`). Then download the Excel workbook. Use the **Needs Review** sheet to see which tools need a manual check or a lineage annotation.

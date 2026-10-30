@@ -1,5 +1,6 @@
 import importlib
 import json
+import os
 import keyring
 import pytest
 from keyring.backend import KeyringBackend
@@ -79,3 +80,36 @@ def test_external_entities_are_not_resolved(tmp_path):
 </Node></Nodes><Connections /></AlteryxDocument>""")
     tools, _, _ = parse_workflow(str(workflow))
     assert 'TOP SECRET' not in tools[0]['config_xml']
+
+
+def test_failed_secret_save_does_not_keep_an_older_secret(memory_keyring, monkeypatch):
+    db.save_connection('Prod', 'https://old', 'client', 'old-secret')
+    def fail(*args):
+        raise RuntimeError('credential store locked')
+    monkeypatch.setattr(keyring, 'set_password', fail)
+    assert db.save_connection('Prod', 'https://new', 'client2', 'new-secret') == (True, False)
+    assert db.load_connections()['Prod'] == {'url': 'https://new', 'client_id': 'client2', 'client_secret': ''}
+
+
+def test_package_entries_cannot_point_outside_the_download_folder(tmp_path, monkeypatch):
+    import io
+    import zipfile
+    import server_client
+    victim = tmp_path / 'victim.yxmd'
+    victim.write_text('original')
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, 'w') as zf:
+        zf.writestr('../victim.yxmd', '<AlteryxDocument />')
+
+    class FakeResponse:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size): yield package.getvalue()
+
+    monkeypatch.setattr(server_client.requests, 'get', lambda *args, **kwargs: FakeResponse())
+    download_dir = tmp_path / 'downloads'
+    path = server_client.download_and_unpack_workflow('https://alteryx/', 'key', 'abc', str(download_dir))
+    assert os.path.dirname(os.path.dirname(path)) == str(download_dir)
+    assert os.path.basename(path) == 'victim.yxmd'
+    assert victim.read_text() == 'original'

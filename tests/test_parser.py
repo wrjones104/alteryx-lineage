@@ -79,3 +79,39 @@ def test_find_paths_in_config():
     tools, _, _ = parse_workflow(os.path.join(FIXTURES, 'Extract_GL.yxmd'))
     formula = next(t for t in tools if t['id'] == '2')
     assert find_paths_in_config(formula['config_xml']) == ['\\\\fileserver\\finance\\archive\\']
+
+
+def _io_item(plugin, config_xml='', annotation=''):
+    tool = {'tool_db_id': 1, 'id': '1', 'plugin': plugin, 'config_xml': config_xml, 'annotation': annotation}
+    inputs, outputs = extract_io_tools([tool])
+    return (inputs + outputs)[0] if inputs or outputs else None
+
+
+def test_sql_and_annotated_databases_are_not_files():
+    assert classify_source("SELECT * FROM dbo.Accounts WHERE name LIKE '%x%'") == 'Database'
+    annotation = '--- lineage ---\noutputs:\n  - type: database\n    path: PROD.FINANCE.GL\n---'
+    item = _io_item('JupyterCode', annotation=annotation)
+    assert item['data_store_type'] == 'Database' and item['flags'] == []
+
+
+def test_unconfigured_directory_tool_is_not_found():
+    item = _io_item('AlteryxBasePluginsGui.Directory.Directory',
+                    '<Configuration><Directory /><FileSpec>*.csv</FileSpec></Configuration>')
+    assert item['path'] is None and item['source_detail'] == 'Not Found'
+
+
+def test_quoted_sheet_names_and_alias_order():
+    assert split_source(r"\\srv\book.xlsx|||`'GL Summary$'`") == (r'\\srv\book.xlsx', 'GL Summary')
+    # The more specific mapping wins even when the shorter one is written with extra slashes
+    aliases = ((r'S:\\\\', r'\\srv\root'), (r'S:\AP', r'\\srv\payables'))
+    assert resolve_path(r'S:\AP\inv.csv', aliases) == r'\\srv\payables\inv.csv'
+
+
+def test_fields_are_stored_per_output_anchor():
+    tools, _, _ = parse_workflow(os.path.join(FIXTURES, 'Join_Union.yxmd'))
+    join = next(t for t in tools if t['id'] == '3')
+    by_anchor = {}
+    for field in join['output_fields']:
+        by_anchor.setdefault(field['anchor'], []).append(field['name'])
+    assert by_anchor['Right'] == ['CustomerID', 'Amount', 'OrderDate']
+    assert 'OrderDate' not in by_anchor['Join']

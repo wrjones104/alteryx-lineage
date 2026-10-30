@@ -98,4 +98,64 @@ def test_upstream_trace_crosses_workflows(workspace):
     workflow_id = conn.execute("SELECT id FROM workflows WHERE workflow_name = 'Report_GL.yxmd'").fetchone()[0]
     conn.close()
     lineage = tracer.trace_upstream_end_to_end(workspace, workflow_id, tool_id, 'Account', io_map)
-    assert 'Extract_GL.yxmd' in set(lineage['Workflow'])
+    # Crosses both hops: the staging file from Extract_GL, then the wildcard feed from Daily_Feed
+    assert {'Extract_GL.yxmd', 'Daily_Feed.yxmd'} <= set(lineage['Workflow'])
+    assert lineage.iloc[0]['Workflow'] == 'Daily_Feed.yxmd'
+
+
+def test_wildcard_inputs_link_in_lineage_and_impact(workspace):
+    db.save_path_aliases(workspace, [('S:', r'\\fileserver\finance')])
+    io_map = tracer.build_io_map(workspace)
+    pattern = io_map[r'\\fileserver\finance\raw\gl_*.csv']
+    assert [p['workflow_name'] for p in pattern['producers']] == ['Daily_Feed.yxmd']
+    assert pattern['producer'] is None  # nothing writes the pattern itself
+    dated = io_map[r'\\fileserver\finance\raw\gl_20261030.csv']
+    assert [c['workflow_name'] for c in dated['consumers']] == ['Extract_GL.yxmd']
+
+    impact = reports.generate_impact_report(reports.get_raw_io_list(workspace))
+    row = impact[impact['Data Source'] == r'\\fileserver\finance\raw\gl_20261030.csv'].iloc[0]
+    assert row['Producing Workflow'] == 'Daily_Feed.yxmd' and row['ConsumingWorkflows'] == ['Extract_GL.yxmd']
+
+    conn = db.create_connection()
+    workflow_id, tool_id = conn.execute("""SELECT w.id, t.id FROM tools t JOIN workflows w ON t.workflow_id = w.id
+                                           WHERE w.workflow_name = 'Daily_Feed.yxmd' AND t.tool_id_xml = '1'""").fetchone()
+    conn.close()
+    endpoints = tracer.trace_downstream_end_to_end(workspace, workflow_id, tool_id, 'Account', io_map)
+    assert 'Report_GL.yxmd' in set(endpoints['Workflow'])
+
+
+def test_producers_are_matched_by_excel_sheet():
+    io_map = {'book.xlsx': {'producers': [{'tool_db_id': 1, 'sheet': 'summary'}, {'tool_db_id': 2, 'sheet': 'detail'}]}}
+    assert [p['tool_db_id'] for p in tracer._producers_for(io_map, 'book.xlsx', {'path': r'book.xlsx|||`Detail$`'})] == [2]
+    assert len(tracer._producers_for(io_map, 'book.xlsx', {'path': 'book.xlsx'})) == 2
+
+
+def test_workflow_reading_back_its_own_file_is_not_a_link(workspace):
+    from parser import parse_workflow
+    from conftest import FIXTURES
+    import os
+    tools, connections, meta = parse_workflow(os.path.join(FIXTURES, 'Diamond.yxmd'))
+    db.log_workflow_details(workspace, 'Diamond.yxmd', tools, connections, meta)
+    stores = io_catalog.build_io_catalog(workspace)['Data Stores']
+    history = stores[stores['Data Store'].str.endswith('history.yxdb')].iloc[0]
+    assert history['Role'] == io_catalog.ROLE_FINAL
+    assert 'Read back by the same workflow' in history['Notes']
+
+
+def test_fields_follow_the_connected_join_output(workspace):
+    from parser import parse_workflow
+    from conftest import FIXTURES
+    import os
+    tools, connections, meta = parse_workflow(os.path.join(FIXTURES, 'Join_Union.yxmd'))
+    db.log_workflow_details(workspace, 'Join_Union.yxmd', tools, connections, meta)
+    detail = io_catalog.build_io_catalog(workspace)['I/O Detail']
+    # Output 7 is fed by the Join's R output, not its J output
+    assert _row(detail, 'Join_Union.yxmd', '7')['Fields'] == 'CustomerID, Amount, OrderDate'
+
+
+def test_csv_export_escapes_formulas():
+    import pandas as pd
+    df = pd.DataFrame({'Value': ['=HYPERLINK("x")', '+1', '@SUM(A1)', r'\\srv\a.csv'], 'Count': [1, 2, 3, 4]})
+    text = io_catalog.to_csv_bytes(df).decode('utf-8-sig')
+    assert "'=HYPERLINK" in text and "'+1" in text and "'@SUM" in text
+    assert r'\\srv\a.csv' in text and r"'\\srv" not in text

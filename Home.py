@@ -6,11 +6,11 @@ import server_client
 import gc
 import time
 import os
+import shutil
 import shared
 
-# --- Page Config and DB Setup ---
+# --- Page Config ---
 st.set_page_config(layout="wide", page_title="Manage Data")
-db.create_tables()
 
 # --- Session State Initialization ---
 if 'workspace' not in st.session_state:
@@ -58,12 +58,16 @@ st.write(f"Managing data for workspace: **{st.session_state.workspace}**")
 with st.expander("🔗 Connect to Alteryx Server to Download Workflows"):
     saved_connections = db.load_connections()
     if saved_connections:
-        saved_conn_name = st.selectbox("Load Saved Connection", options=[""] + list(saved_connections.keys()))
-        if saved_conn_name:
-            conn_details = saved_connections[saved_conn_name]
-            st.session_state.server_url = conn_details['url']
-            st.session_state.client_id = conn_details['client_id']
-            st.session_state.client_secret = conn_details['client_secret']
+        def apply_saved_connection():
+            # Fill the fields only when the selection changes, so typing over them (e.g. a secret
+            # that wasn't saved) isn't undone on the next rerun
+            conn_details = saved_connections.get(st.session_state.get('saved_conn_selector'))
+            if conn_details:
+                st.session_state.server_url = conn_details['url']
+                st.session_state.client_id = conn_details['client_id']
+                st.session_state.client_secret = conn_details['client_secret']
+        st.selectbox("Load Saved Connection", options=[""] + list(saved_connections.keys()),
+                     key='saved_conn_selector', on_change=apply_saved_connection)
 
     st.text_input("Server URL", key="server_url")
     st.text_input("Client ID", key="client_id")
@@ -170,26 +174,29 @@ if st.session_state.get('workflows_to_download'):
             progress_bar.progress(i / total_files, text=f"({i+1}/{total_files}) Downloading: {workflow_name}...")
             yxmd_path = server_client.download_and_unpack_workflow(st.session_state.server_url, st.session_state.session_key, wf_id, temp_dir)
             if yxmd_path:
-                progress_bar.progress((i + 0.5) / total_files, text=f"({i+1}/{total_files}) Parsing: {os.path.basename(yxmd_path)}...")
-                tools_list, connections_list, workflow_meta = parse_workflow(yxmd_path)
-                if tools_list is None:
-                    failed_files.append(workflow_name)
-                else:
-                    workflow_meta.update({
-                        'source': 'Alteryx Server',
-                        'source_ref': f"{workflow_name} (id {wf_id}, v{server_row['publishedVersionNumber']}) on {st.session_state.server_url}",
-                        'owner': server_row['ownerName'],
-                    })
-                    file_name = os.path.basename(yxmd_path)
-                    stored_name = db.log_workflow_details(st.session_state.workspace, file_name, tools_list, connections_list,
-                                                          workflow_meta, server_workflow_id=wf_id)
-                    if stored_name is None:
+                try:
+                    progress_bar.progress((i + 0.5) / total_files, text=f"({i+1}/{total_files}) Parsing: {os.path.basename(yxmd_path)}...")
+                    tools_list, connections_list, workflow_meta = parse_workflow(yxmd_path)
+                    if tools_list is None:
                         failed_files.append(workflow_name)
-                    elif stored_name != file_name:
-                        renamed_files.append(f"'{workflow_name}' saved as '{stored_name}'")
-                os.remove(yxmd_path)
-                del tools_list, connections_list
-                gc.collect()
+                    else:
+                        workflow_meta.update({
+                            'source': 'Alteryx Server',
+                            'source_ref': f"{workflow_name} (id {wf_id}, v{server_row['publishedVersionNumber']}) on {st.session_state.server_url}",
+                            'owner': server_row['ownerName'],
+                        })
+                        file_name = os.path.basename(yxmd_path)
+                        stored_name = db.log_workflow_details(st.session_state.workspace, file_name, tools_list, connections_list,
+                                                              workflow_meta, server_workflow_id=wf_id)
+                        if stored_name is None:
+                            failed_files.append(workflow_name)
+                        elif stored_name != file_name:
+                            renamed_files.append(f"'{workflow_name}' saved as '{stored_name}'")
+                    del tools_list, connections_list
+                    gc.collect()
+                finally:
+                    # Each download is unpacked into its own folder
+                    shutil.rmtree(os.path.dirname(yxmd_path), ignore_errors=True)
             else:
                 failed_files.append(workflow_name)
         if failed_files:

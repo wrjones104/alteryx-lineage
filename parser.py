@@ -30,12 +30,32 @@ FLAG_LOCAL_DRIVE = 'Local C: drive (may only exist on the machine that ran it)'
 FLAG_LISTING = 'Directory listing only (reads file names, not contents)'
 REVIEW_FLAGS = {FLAG_NOT_FOUND, FLAG_DYNAMIC, FLAG_MULTI_FILE, FLAG_RELATIVE, FLAG_CONSTANT, FLAG_LOCAL_DRIVE}
 
-# Workflow files are uploaded by users: never expand entities or fetch anything over the network.
-SAFE_XML_PARSER = ET.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
-
 PLACEHOLDER_SOURCES = {'', 'not found', 'unknown', 'n/a', 'none'}
 _DB_PREFIXES = ('aka:', 'odbc:', 'oledb:', 'oci:', 'sqlncli', 'snowbl:', 'simba', 'dsn=')
+_SQL_PREFIX = re.compile(r'^\s*(select|with|exec|execute|call)\b', re.IGNORECASE)
 _PATH_PATTERN = re.compile(r'(?:[A-Za-z]:\\|\\\\[\w.$-]+\\)[^"\'<>|\r\n\t]*')
+# Values of 'type' in a lineage annotation -> data store type
+ANNOTATION_TYPES = {
+    'file': 'File',
+    'database': 'Database', 'db': 'Database', 'table': 'Database', 'sql': 'Database',
+    'api': 'Web/API', 'web': 'Web/API', 'url': 'Web/API',
+    'salesforce': 'Salesforce',
+}
+
+
+def _safe_xml_parser():
+    # Workflow files are uploaded by users: never expand entities or fetch anything over the network.
+    # A new parser per call, because lxml parsers must not be shared between threads (Streamlit sessions).
+    return ET.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+
+
+def safe_fromstring(xml_text):
+    return ET.fromstring(xml_text, parser=_safe_xml_parser())
+
+
+def is_join(plugin):
+    """True for the Join tool only (not Join Multiple, whose inputs are #1, #2, ...)."""
+    return isinstance(plugin, str) and plugin.split('.')[-1] == 'Join'
 
 
 def parse_workflow(workflow_path):
@@ -45,7 +65,7 @@ def parse_workflow(workflow_path):
     and file-like objects. Returns (None, None, None) if the file cannot be parsed.
     """
     try:
-        tree = ET.parse(workflow_path, parser=SAFE_XML_PARSER)
+        tree = ET.parse(workflow_path, parser=_safe_xml_parser())
         root = tree.getroot()
     except Exception as e:
         print(f"Error parsing XML: {e}")
@@ -78,15 +98,22 @@ def parse_workflow(workflow_path):
         if engine_settings is not None:
             macro_path = engine_settings.get('Macro')
 
+        # One schema per output anchor: a Join has Join/Left/Right, a Filter True/False
         output_fields = []
-        for record_info_node in node.findall('.//RecordInfo'):
-            for field_node in record_info_node.findall('Field'):
+        for meta_info_node in node.findall('./Properties/MetaInfo'):
+            anchor = meta_info_node.get('connection')
+            seen = set()
+            for field_node in meta_info_node.findall('./RecordInfo/Field'):
+                name = field_node.get('name')
+                if not name or name in seen: continue
+                seen.add(name)
                 output_fields.append({
-                    'name': field_node.get('name'),
+                    'name': name,
                     'type': field_node.get('type'),
                     'size': field_node.get('size'),
                     'source': field_node.get('source'),
                     'description': field_node.get('description'),
+                    'anchor': anchor,
                 })
 
         tools.append({
@@ -156,8 +183,8 @@ def split_source(path):
     location, sep, obj = path.partition('|||')
     obj = obj.strip() if sep else None
     if obj and not obj.lower().startswith('select'):
-        # Excel inputs are written as `Sheet1$`, outputs as Sheet1
-        obj = obj.strip('`').rstrip('$') or None
+        # Excel inputs are written as `Sheet1$` (or `'Sheet 1$'` with spaces), outputs as Sheet1
+        obj = obj.strip('`').strip("'").rstrip('$') or None
     return location.strip(), obj or None
 
 
@@ -167,7 +194,8 @@ def classify_source(path):
     location = split_source(path)[0]
     low = location.lower()
     if re.match(r'^(https?|s?ftp)://', low): return 'Web/API'
-    if low.startswith(_DB_PREFIXES) or re.search(r'\b(dsn|driver|server|data source)\s*=', low): return 'Database'
+    if low.startswith(_DB_PREFIXES) or re.search(r'\b(dsn|driver|server|data source)\s*=', low) or _SQL_PREFIX.match(low):
+        return 'Database'
     if low.startswith(('\\\\', '//')) or re.match(r'^[a-z]:', low) or '%' in low or ntpath.splitext(low)[1]:
         return 'File'
     return 'Other'
@@ -191,9 +219,9 @@ def resolve_path(location, aliases=()):
     if not location: return ''
     path = ntpath.normpath(location.strip())
     lowered = ntpath.normcase(path)
-    for prefix, target in aliases or ():
-        if not prefix or not target: continue
-        norm_prefix = _norm_prefix(prefix)
+    # Most specific mapping first, compared after normalizing (so 'S:\\\\' doesn't beat 'S:\\AP')
+    usable = [(_norm_prefix(p), t) for p, t in aliases or () if p and p.strip() and t and t.strip()]
+    for norm_prefix, target in sorted(usable, key=lambda a: len(a[0]), reverse=True):
         if lowered.startswith(norm_prefix) or lowered + '\\' == norm_prefix:
             path = ntpath.normpath(ntpath.join(target.strip(), path[len(norm_prefix):]))
             break
@@ -225,7 +253,7 @@ def find_paths_in_config(config_xml):
     """Finds Windows file paths anywhere in a tool's configuration (text or attribute values)."""
     if not config_xml: return []
     try:
-        config_root = ET.fromstring(config_xml)
+        config_root = safe_fromstring(config_xml)
     except (ET.ParseError, ValueError):
         return []
     found = []
@@ -238,11 +266,11 @@ def find_paths_in_config(config_xml):
     return found
 
 
-def _path_flags(path):
+def _path_flags(path, data_store_type):
     flags = []
     if is_placeholder(path):
         return [FLAG_NOT_FOUND]
-    if classify_source(path) != 'File':
+    if data_store_type != 'File':
         return flags
     location = split_source(path)[0]
     if '*' in location or '?' in location: flags.append(FLAG_WILDCARD)
@@ -255,14 +283,15 @@ def _path_flags(path):
 
 def _io_item(io_base, plugin, tool_type, source_detail, path, data_store_type=None,
              is_dynamic=False, extra_flags=(), write_mode=None):
-    flags = _path_flags(path) + [f for f in extra_flags if f]
+    data_store_type = data_store_type or classify_source(path)
+    flags = _path_flags(path, data_store_type) + [f for f in extra_flags if f]
     return {
         **io_base,
         'plugin': plugin,
         'source_detail': source_detail,
         'tool_type': tool_type,
         'path': None if is_placeholder(path) else path,
-        'data_store_type': data_store_type or classify_source(path),
+        'data_store_type': data_store_type,
         'is_dynamic': is_dynamic,
         'write_mode': write_mode,
         'flags': flags,
@@ -286,7 +315,7 @@ def extract_io_tools(tools_list):
         macro = tool.get('macro') or ''
         if 'Input Data Selector.yxmc' in macro:
             try:
-                config_root = ET.fromstring(tool['config_xml'])
+                config_root = safe_fromstring(tool['config_xml'])
                 value_node = config_root.find(".//Value[@name='Drop Down (5)']")
                 if value_node is not None and value_node.text:
                     name = 'Input Data Selector (Macro)'
@@ -300,7 +329,9 @@ def extract_io_tools(tools_list):
                 for entry in manual_lineage.get(key) or []:
                     if not isinstance(entry, dict): continue
                     detail = f"{entry.get('type', 'N/A')}: {entry.get('path', 'N/A')}"
-                    target.append(_io_item(io_base, 'Manual Annotation', 'Manual Annotation', detail, entry.get('path')))
+                    store_type = ANNOTATION_TYPES.get(str(entry.get('type') or '').strip().lower())
+                    target.append(_io_item(io_base, 'Manual Annotation', 'Manual Annotation', detail, entry.get('path'),
+                                           data_store_type=store_type))
             continue
 
         plugin = tool.get('plugin') or ''
@@ -310,7 +341,7 @@ def extract_io_tools(tools_list):
         direction, tool_type = match
 
         try:
-            config_root = ET.fromstring(tool['config_xml'])
+            config_root = safe_fromstring(tool['config_xml'])
         except (ET.ParseError, TypeError, ValueError):
             continue
 
@@ -323,10 +354,9 @@ def extract_io_tools(tools_list):
         data_store_type, is_dynamic, extra_flags = None, False, []
 
         if 'Directory' in plugin:
-            dir_node = config_root.find('.//Directory')
-            spec_node = config_root.find('.//FileSpec')
-            if dir_node is not None and spec_node is not None:
-                source_detail = path = f"{dir_node.text}\\{spec_node.text}"
+            directory = _node_value(config_root.find('.//Directory'))
+            spec = _node_value(config_root.find('.//FileSpec')) or '*.*'
+            source_detail = path = f"{directory}\\{spec}" if directory else "Not Found"
             extra_flags.append(FLAG_LISTING)
         elif 'DynamicInput' in plugin:
             template = _node_value(config_root.find('.//InputConfiguration/Configuration/File'))

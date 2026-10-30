@@ -19,14 +19,15 @@ A web application built with Python and Streamlit to parse Alteryx workflows, st
 * **I/O Catalog (📒):** A master list of every input and output in the workspace, built for data catalog work.
     * One row per Input/Output tool with workflow, tool, path (split into share, folder, file name, format), sheet/table, write mode and field list.
     * Links each file to the workflows that **produce** and **consume** it, so workflow-to-workflow dependencies show up directly. Each file is labelled *External Source*, *Intermediate* or *Final Output*.
-    * **Drive mappings** treat `S:\...` and `\\fileserver\share\...` as the same file. Excel sheet names, path case and wildcard inputs (`gl_*.csv`) are matched too.
+    * **Drive mappings** treat `S:\...` and `\\fileserver\share\...` as the same file. Excel sheet names, path case and wildcard inputs (`gl_*.csv`) are matched too, here and in the Impact Analysis and Field Lineage pages.
+    * A workflow that reads back a file it writes itself (for example a `.yxdb` history snapshot) is not counted as a cross-workflow link; its Data Stores row is noted "Read back by the same workflow".
     * A **Needs Review** list flags what the parser can't see for itself: dynamic or relative paths, Python/R/Run Command tools, custom macros, and file paths found in other tools' settings.
     * Download as a multi-sheet Excel workbook (I/O Detail, Data Stores, Workflows, Needs Review) or as CSV.
 * **Impact Analysis Report (💥):**
     * View "blast radius" by **Data Source** to see which files/tables are the most critical dependencies.
     * Toggle to view by **Workflow** to see which workflows produce the most used outputs.
 * **Field Lineage Explorer (🗺️):**
-    * **Upstream Tracing:** Select any field from any tool and trace it backward to its origin, correctly tracking renames through `Select`, `Join`, and `Formula` tools.
+    * **Upstream Tracing:** Select any field from any tool and trace it backward to its origin, correctly tracking renames through `Select`, `Join`, and `Formula` tools. When a field comes from more than one place (a Union, or a Filter's True and False sides joined back together), each route is numbered in a **Branch** column.
     * **Downstream Tracing:** Select a field and find all the final output files it is a part of, tracking renames along the way.
 * **Debugging & Validation:**
     * **Raw I/O Log:** An unfiltered view of every input and output parsed from all workflows.
@@ -92,8 +93,8 @@ A web application built with Python and Streamlit to parse Alteryx workflows, st
 2.  **Add Workflows:**
     * **From Server:** Expand the "Connect to Server" section, enter your credentials (or load a saved connection), and click "Connect". A table of accessible workflows will appear in the main window. Use the checkboxes to select workflows and then click "Download & Process Selected".
     * **From Local:** Use the "Upload Local Workflows" uploader to select one or more `.yxmd` or `.yxwz` files from your computer. They will be processed automatically.
-    * Server workflows are tracked by their server ID, so two server workflows with the same file name stay separate (the second gets its ID added to its name). Local uploads are matched by file name, so uploading a file with the same name replaces the earlier one.
-    * Re-process workflows that were loaded before this version so that Join/Union field tracing can use their connection details.
+    * Server workflows are tracked by their server ID, so two server workflows with the same file name stay separate (the second gets its ID added to its name). A server download never replaces a local upload of the same name; it is saved under its ID instead. Local uploads are matched by file name, so uploading a file with the same name replaces the earlier one.
+    * Re-process workflows that were loaded before this version. Join/Union field tracing needs their connection details, and field lists after a Join or Filter need the per-output schemas.
 3.  **Analyze:**
     * Use the pages in the sidebar to switch between the **Impact Analysis**, **Field Lineage Explorer**, **I/O Catalog**, and other views to explore your workflow data.
 4.  **Catalog:** On the **I/O Catalog** page, add your drive mappings first (for example `S:` → `\\fileserver\finance`). Then download the Excel workbook. Use the **Needs Review** sheet to see which tools need a manual check or a lineage annotation.

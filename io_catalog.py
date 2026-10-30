@@ -8,6 +8,9 @@ from database_manager import create_connection
 from parser import (extract_io_tools, strip_lineage_annotation, split_source, location_type, resolve_path,
                     lineage_key, wildcard_match, find_paths_in_config, REVIEW_FLAGS)
 
+# Characters that make Excel treat a CSV cell as a formula
+CSV_FORMULA_PREFIXES = ('=', '+', '-', '@', '\t', '\r')
+
 # Tools that can read or write data in ways the parser cannot see. Matched as a plugin substring.
 OPAQUE_PLUGINS = {
     'JupyterCode': 'Python tool',
@@ -46,11 +49,11 @@ def _load_workspace(workspace_name):
                 FROM tools t {workspace_join}
             """, conn, params=params),
             'fields': pd.read_sql_query(f"""
-                SELECT tf.tool_id, tf.field_name FROM tool_fields tf
+                SELECT tf.tool_id, tf.field_name, tf.field_anchor FROM tool_fields tf
                 JOIN tools t ON tf.tool_id = t.id {workspace_join} ORDER BY tf.id
             """, conn, params=params),
             'connections': pd.read_sql_query("""
-                SELECT c.workflow_id, c.origin_tool_id_xml, c.destination_tool_id_xml
+                SELECT c.workflow_id, c.origin_tool_id_xml, c.destination_tool_id_xml, c.origin_anchor
                 FROM connections c JOIN workflows w ON c.workflow_id = w.id
                 JOIN workspaces ws ON w.workspace_id = ws.id WHERE ws.name = ?
             """, conn, params=params),
@@ -61,24 +64,29 @@ def _load_workspace(workspace_name):
 
 def _schema_finder(tools_df, fields_df, connections_df):
     """Returns a function giving the field list for a tool, walking upstream when the tool itself
-    has no stored schema (Output Data tools usually don't)."""
-    fields_by_tool = {tool_id: list(dict.fromkeys(group)) for tool_id, group in fields_df.groupby('tool_id')['field_name']}
+    has no stored schema (Output Data tools usually don't). Upstream tools with several outputs (a Join's
+    J/L/R) give the fields of the output that is actually connected."""
+    fields_by_tool, fields_by_anchor = defaultdict(list), defaultdict(list)
+    for row in fields_df.itertuples():
+        fields_by_tool[row.tool_id].append(row.field_name)
+        if row.field_anchor: fields_by_anchor[(row.tool_id, row.field_anchor)].append(row.field_name)
     db_id_by_xml = {(row.workflow_db_id, row.tool_id_xml): row.tool_db_id for row in tools_df.itertuples()}
     tool_by_db_id = {row.tool_db_id: (row.workflow_db_id, row.tool_id_xml) for row in tools_df.itertuples()}
     origins = defaultdict(list)
     for row in connections_df.itertuples():
-        origins[(row.workflow_id, row.destination_tool_id_xml)].append(row.origin_tool_id_xml)
+        origins[(row.workflow_id, row.destination_tool_id_xml)].append((row.origin_tool_id_xml, row.origin_anchor))
 
     def find(tool_db_id):
-        queue, visited = deque([tool_db_id]), set()
+        queue, visited = deque([(tool_db_id, None)]), set()
         while queue:
-            current = queue.popleft()
-            if current in visited or current not in tool_by_db_id: continue
-            visited.add(current)
-            if fields_by_tool.get(current): return fields_by_tool[current]
+            current, anchor = queue.popleft()
+            if (current, anchor) in visited or current not in tool_by_db_id: continue
+            visited.add((current, anchor))
+            fields = fields_by_anchor.get((current, anchor)) or fields_by_tool.get(current)
+            if fields: return list(dict.fromkeys(fields))
             workflow_id, xml_id = tool_by_db_id[current]
-            for origin_xml in origins.get((workflow_id, xml_id), []):
-                queue.append(db_id_by_xml.get((workflow_id, origin_xml)))
+            for origin_xml, origin_anchor in origins.get((workflow_id, xml_id), []):
+                queue.append((db_id_by_xml.get((workflow_id, origin_xml)), origin_anchor))
         return []
     return find
 
@@ -88,7 +96,8 @@ def _join(values):
 
 
 def _role(produced, consumed):
-    if produced and consumed: return ROLE_INTERMEDIATE
+    # Intermediate needs two different workflows: one writes, another reads (not a workflow re-reading its own file)
+    if produced and consumed and len(produced | consumed) > 1: return ROLE_INTERMEDIATE
     if produced: return ROLE_FINAL
     return ROLE_SOURCE
 
@@ -181,11 +190,15 @@ def build_io_catalog(workspace_name, aliases=()):
             notes = []
             if len(producers.get(key, ())) > 1: notes.append('Written by more than one workflow')
             if key in pattern_matches: notes.append(f"Wildcard pattern matching {len(pattern_matches[key])} output(s) in this workspace")
+            if produced and produced == consumed and len(produced) == 1: notes.append('Read back by the same workflow')
             first = group.iloc[0]
+            store = group['Resolved Path'].mode().iloc[0]
             store_rows.append({
-                'Data Store': group['Resolved Path'].mode().iloc[0],
+                'Data Store': store,
                 'Data Store Type': first['Data Store Type'],
-                'Location Type': first['Location Type'],
+                # From the resolved path, not whichever tool sorted first (which may use a mapped drive)
+                'Location Type': location_type(store) if first['Data Store Type'] == 'File' and store else first['Location Type'],
+                'Wildcard': '*' in key or '?' in key,
                 'Share / Drive': first['Share / Drive'],
                 'Format': first['Format'],
                 'Role': _role(produced, consumed),
@@ -275,6 +288,12 @@ def _natural_sort(column):
     if column.name == 'Tool ID':
         return pd.to_numeric(column, errors='coerce')
     return column.astype(str).str.lower()
+
+
+def to_csv_bytes(df):
+    """CSV for Excel: text that would run as a formula when opened (=, +, -, @) is prefixed with a quote."""
+    safe = df.map(lambda v: f"'{v}" if isinstance(v, str) and v.startswith(CSV_FORMULA_PREFIXES) else v) if not df.empty else df
+    return safe.to_csv(index=False).encode('utf-8-sig')
 
 
 def to_excel_bytes(sheets):

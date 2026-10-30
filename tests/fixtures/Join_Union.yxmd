@@ -53,6 +53,20 @@
             <Field name="Amount" type="Double" />
           </RecordInfo>
         </MetaInfo>
+        <MetaInfo connection="Left">
+          <RecordInfo>
+            <Field name="CustomerID" type="V_String" />
+            <Field name="Name" type="V_String" />
+            <Field name="Region" type="V_String" />
+          </RecordInfo>
+        </MetaInfo>
+        <MetaInfo connection="Right">
+          <RecordInfo>
+            <Field name="CustomerID" type="V_String" />
+            <Field name="Amount" type="Double" />
+            <Field name="OrderDate" type="Date" />
+          </RecordInfo>
+        </MetaInfo>
       </Properties>
     </Node>
     <Node ToolID="4">

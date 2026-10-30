@@ -5,9 +5,15 @@ import database_manager as db
 import io_catalog
 import shared  # Import the shared components
 
-# --- Page Config and DB Setup ---
+# --- Page Config ---
 st.set_page_config(layout="wide", page_title="I/O Catalog")
-db.create_tables()
+
+
+@st.cache_data(show_spinner=False)
+def _catalog_xlsx(workspace, aliases):
+    # Built once per catalog, not on every rerun (each keystroke in the filters reruns the page)
+    return io_catalog.to_excel_bytes(io_catalog.build_io_catalog(workspace, aliases))
+
 
 # --- Session State Initialization ---
 if 'workspace' not in st.session_state:
@@ -67,7 +73,9 @@ m1.metric("Workflows", len(workflows))
 m2.metric("Inputs / Outputs", f"{(detail['Direction'] == 'Input').sum() if not detail.empty else 0} / "
                               f"{(detail['Direction'] == 'Output').sum() if not detail.empty else 0}")
 m3.metric("Unique Data Stores", len(stores))
-m4.metric("Cross-Workflow Links", int((stores['Role'] == io_catalog.ROLE_INTERMEDIATE).sum()) if not stores.empty else 0,
+# A wildcard input's pattern row repeats the links of the files it matches, so it isn't counted again
+m4.metric("Cross-Workflow Links",
+          int(((stores['Role'] == io_catalog.ROLE_INTERMEDIATE) & ~stores['Wildcard']).sum()) if not stores.empty else 0,
           help="Data stores written by one workflow and read by another")
 m5.metric("Needs Review", len(review), help="Tools whose inputs/outputs could not be fully determined")
 
@@ -75,11 +83,11 @@ m5.metric("Needs Review", len(review), help="Tools whose inputs/outputs could no
 file_stem = f"io_catalog_{workspace}_{date.today():%Y%m%d}".replace(' ', '_')
 d1, d2, _ = st.columns([1.2, 1.2, 4])
 with d1:
-    st.download_button("⬇️ Download Excel (all sheets)", data=io_catalog.to_excel_bytes(catalog),
+    st.download_button("⬇️ Download Excel (all sheets)", data=_catalog_xlsx(workspace, aliases),
                        file_name=f"{file_stem}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 with d2:
-    st.download_button("⬇️ Download I/O Detail (CSV)", data=detail.to_csv(index=False).encode('utf-8-sig'),
+    st.download_button("⬇️ Download I/O Detail (CSV)", data=io_catalog.to_csv_bytes(detail),
                        file_name=f"{file_stem}.csv", mime="text/csv")
 
 st.markdown("---")

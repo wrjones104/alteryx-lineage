@@ -64,3 +64,21 @@ def test_old_database_is_migrated(tmp_path, monkeypatch):
     conn.close()
     assert {'server_workflow_id', 'owner', 'author'} <= workflow_columns
     assert {'origin_anchor', 'destination_anchor'} <= connection_columns
+
+
+def test_server_download_does_not_replace_a_local_upload(workspace):
+    tools, connections, meta = parse_workflow(os.path.join(FIXTURES, 'Daily_Feed.yxmd'))
+    db.log_workflow_details('Server', 'Workflow.yxmd', tools, connections, {**meta, 'source': 'Local Upload'})
+    assert _log('Workflow.yxmd', 'Extract_GL.yxmd', 'id-5') == 'Workflow.yxmd [id-5]'
+    assert _rows('Server') == [('Workflow.yxmd', None, 2), ('Workflow.yxmd [id-5]', 'id-5', 6)]
+
+
+def test_removed_metadata_is_cleared(workspace):
+    tools, connections, meta = parse_workflow(os.path.join(FIXTURES, 'Daily_Feed.yxmd'))
+    db.log_workflow_details('Server', 'Meta.yxmd', tools, connections, {**meta, 'description': 'Old', 'owner': 'Pat'})
+    db.log_workflow_details('Server', 'Meta.yxmd', tools, connections, {**meta, 'description': None})
+    conn = db.create_connection()
+    row = conn.execute("SELECT description, owner FROM workflows WHERE workflow_name = 'Meta.yxmd'").fetchone()
+    conn.close()
+    # Description was removed in the file; owner wasn't part of this save, so it is kept
+    assert row == (None, 'Pat')

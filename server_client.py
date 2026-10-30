@@ -63,7 +63,10 @@ def get_user_map(base_url):
 
 
 def get_workflows(base_url, session_key):
-    """Fetches all workflows accessible to the user, including extra metadata."""
+    """
+    Fetches all workflows accessible to the user, including extra metadata. Returns None if the list
+    couldn't be fetched (e.g. an expired session), so callers can tell that from an account with no workflows.
+    """
     user_map = get_user_map(base_url)
     headers = {'Authorization': f'Bearer {session_key}'}
     workflows_url = f"{base_url.rstrip('/')}/webapi/v3/workflows"
@@ -74,7 +77,7 @@ def get_workflows(base_url, session_key):
         workflows_list = response.json()
         if not isinstance(workflows_list, list):
             print(f"API Error: Expected a list of workflows but got a {type(workflows_list)}")
-            return []
+            return None
             
         detailed_workflows = []
         for wf in workflows_list:
@@ -94,7 +97,7 @@ def get_workflows(base_url, session_key):
         
     except requests.exceptions.RequestException as e:
         print(f"Failed to retrieve workflows: {e}")
-        return []
+        return None
 
 def download_and_unpack_workflow(base_url, session_key, workflow_id, download_dir):
     """

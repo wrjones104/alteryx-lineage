@@ -370,7 +370,7 @@ def get_workflows_in_workspace(workspace_name):
         """
         df = pd.read_sql_query(query, conn, params=(workspace_name,))
         return df
-    except Error as e:
+    except (Error, pd.errors.DatabaseError) as e:  # read_sql_query wraps sqlite3 errors
         print(f"Database error in get_workflows_in_workspace: {e}")
         return pd.DataFrame()
     finally:
@@ -390,7 +390,7 @@ def get_server_workflows_in_workspace(workspace_name):
             WHERE ws.name = ? AND w.server_workflow_id IS NOT NULL
             ORDER BY w.workflow_name
         """, conn, params=(workspace_name,))
-    except Error as e:
+    except (Error, pd.errors.DatabaseError) as e:
         print(f"Database error in get_server_workflows_in_workspace: {e}")
         return pd.DataFrame()
     finally:

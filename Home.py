@@ -20,6 +20,19 @@ if 'server_url' not in st.session_state: st.session_state.server_url = ""
 if 'client_id' not in st.session_state: st.session_state.client_id = ""
 if 'client_secret' not in st.session_state: st.session_state.client_secret = ""
 
+def set_gallery(workflows, keep_selection=True):
+    """
+    Stores the server's workflow list (None if it couldn't be fetched) and rebuilds the download table
+    from it, keeping the rows already ticked there.
+    """
+    st.session_state.gallery_workflows = workflows
+    previous = st.session_state.get('workflow_df')
+    selected = set(previous.loc[previous['Select'], 'id']) if keep_selection and previous is not None and not previous.empty else set()
+    df = pd.DataFrame(workflows or [])
+    if not df.empty:
+        df['Select'] = df['id'].isin(selected)
+    st.session_state.workflow_df = df
+
 # --- Sidebar ---
 shared.create_sidebar()
 
@@ -78,18 +91,19 @@ with st.expander("🔗 Connect to Alteryx Server to Download Workflows"):
     with col1:
         if st.button("Connect to Server"):
             with st.spinner("Authenticating..."):
-                s_key = server_client.get_session_key(st.session_state.server_url, st.session_state.client_id, st.session_state.client_secret)
+                target_url = st.session_state.server_url
+                s_key = server_client.get_session_key(target_url, st.session_state.client_id, st.session_state.client_secret)
                 if s_key:
                     st.session_state.session_key = s_key
-                    st.session_state.gallery_workflows = server_client.get_workflows(st.session_state.server_url, s_key)
-                    if st.session_state.gallery_workflows:
-                        df = pd.DataFrame(st.session_state.gallery_workflows)
-                        df['Select'] = False
-                        st.session_state.workflow_df = df
+                    # Everything after connecting uses this URL, not the text box, which can be edited
+                    # (or changed by loading a saved connection) while this session key is still active
+                    st.session_state.connected_server_url = target_url
+                    set_gallery(server_client.get_workflows(target_url, s_key), keep_selection=False)
                     st.success("Connection successful!")
                 else:
                     st.session_state.session_key = None
-                    st.session_state.gallery_workflows = []
+                    st.session_state.connected_server_url = None
+                    set_gallery([], keep_selection=False)
                     st.error("Authentication failed.")
     with col2:
         save_conn_name = st.text_input("Save connection as:")
@@ -107,15 +121,18 @@ with st.expander("🔗 Connect to Alteryx Server to Download Workflows"):
                 st.warning("Please provide a name and fill in all credential fields to save.")
 
 # Workspace Update Check: workflows downloaded earlier whose published version has changed since
-if st.session_state.get('session_key') and not st.session_state.get('workflows_to_download'):
+connected_url = st.session_state.get('connected_server_url')
+if st.session_state.get('session_key') and connected_url and not st.session_state.get('workflows_to_download'):
     st.markdown("---")
     st.subheader("Check Workspace for Server Updates")
+    st.caption(f"Compared with {connected_url}")
     status_df = server_sync.compare_with_server(db.get_server_workflows_in_workspace(st.session_state.workspace),
-                                                st.session_state.get('gallery_workflows'), st.session_state.server_url)
-    if status_df.empty:
+                                                st.session_state.get('gallery_workflows'), connected_url)
+    if st.session_state.get('gallery_workflows') is None:
+        st.warning("Couldn't get the workflow list from the server. The session may have expired: reconnect, "
+                   "or try Re-check Server.")
+    elif status_df.empty:
         st.info("No workflows in this workspace have been downloaded from a server yet.")
-    elif not st.session_state.get('gallery_workflows'):
-        st.warning("The server returned no workflows, so the workspace can't be checked. Try reconnecting.")
     else:
         counts = status_df['Status'].value_counts()
         st.caption(" · ".join(f"{status}: {counts[status]}" for status in counts.index))
@@ -125,27 +142,20 @@ if st.session_state.get('session_key') and not st.session_state.get('workflows_t
 
         downloadable = status_df[status_df['Status'].isin(server_sync.DOWNLOADABLE)]
         id_by_name = dict(zip(downloadable['Workflow'], downloadable['server_workflow_id']))
-        u_col1, u_col2 = st.columns([4, 1])
-        with u_col1:
-            to_update = st.multiselect(
-                "Workflows to update", options=list(id_by_name),
-                default=list(downloadable.loc[downloadable['Status'] == server_sync.STATUS_UPDATE, 'Workflow']),
-                help=f"'{server_sync.STATUS_UNKNOWN}' rows were downloaded before versions were recorded, "
-                     "or were replaced by a local upload. Re-download them to record the current version.")
-        with u_col2:
-            st.write("")
-            if st.button("Re-check Server"):
-                # Picks up versions published since you connected
-                st.session_state.gallery_workflows = server_client.get_workflows(st.session_state.server_url, st.session_state.session_key)
-                if st.session_state.gallery_workflows:
-                    df = pd.DataFrame(st.session_state.gallery_workflows)
-                    df['Select'] = False
-                    st.session_state.workflow_df = df
-                st.rerun()
+        to_update = st.multiselect(
+            "Workflows to update", options=list(id_by_name),
+            default=list(downloadable.loc[downloadable['Status'] == server_sync.STATUS_UPDATE, 'Workflow']),
+            help=f"'{server_sync.STATUS_UNKNOWN}' rows were downloaded before versions were recorded; re-download "
+                 f"them to record the current version. '{server_sync.STATUS_LOCAL}' rows hold a file uploaded from "
+                 "a computer, which may have unpublished edits: downloading replaces it with the server's version.")
         if st.button(f"Download Updates ({len(to_update)})", disabled=not to_update, type="primary"):
             st.session_state.workflows_to_download = [id_by_name[name] for name in to_update]
             st.session_state.cancel_download = False
             st.rerun()
+    if st.button("Re-check Server"):
+        # Picks up versions published since you connected
+        set_gallery(server_client.get_workflows(connected_url, st.session_state.session_key))
+        st.rerun()
 
 # Server Workflow Download Table
 if st.session_state.get('session_key') and 'workflow_df' in st.session_state and not st.session_state.workflow_df.empty:
@@ -206,15 +216,26 @@ if st.session_state.get('workflows_to_download'):
     progress_bar = st.progress(0, "Starting...")
     temp_dir = "temp_downloads"
     failed_files, renamed_files = [], []
+    connected_url = st.session_state.get('connected_server_url')
+    # The package endpoint serves the version published now, so the versions to record are read now too,
+    # not from when you connected. The cached list is kept if the server can't be reached.
+    latest = server_client.get_workflows(connected_url, st.session_state.session_key) if connected_url else None
+    if latest:
+        set_gallery(latest)
+    # Read from the server's own list: in workflow_df, one missing version turns every version into a float ('3.0')
+    gallery_by_id = {str(wf['id']): wf for wf in st.session_state.get('gallery_workflows') or []}
     try:
         for i, wf_id in enumerate(workflow_ids):
             if st.session_state.get('cancel_download'):
                 st.warning("Operation cancelled by user.")
                 break
-            server_row = st.session_state.workflow_df.loc[st.session_state.workflow_df['id'] == wf_id].iloc[0]
+            server_row = gallery_by_id.get(str(wf_id))
+            if server_row is None or not connected_url:
+                failed_files.append(str(wf_id) if server_row is None else server_row['name'])
+                continue
             workflow_name = server_row['name']
             progress_bar.progress(i / total_files, text=f"({i+1}/{total_files}) Downloading: {workflow_name}...")
-            yxmd_path = server_client.download_and_unpack_workflow(st.session_state.server_url, st.session_state.session_key, wf_id, temp_dir)
+            yxmd_path = server_client.download_and_unpack_workflow(connected_url, st.session_state.session_key, wf_id, temp_dir)
             if yxmd_path:
                 try:
                     progress_bar.progress((i + 0.5) / total_files, text=f"({i+1}/{total_files}) Parsing: {os.path.basename(yxmd_path)}...")
@@ -222,14 +243,7 @@ if st.session_state.get('workflows_to_download'):
                     if tools_list is None:
                         failed_files.append(workflow_name)
                     else:
-                        workflow_meta.update({
-                            'source': 'Alteryx Server',
-                            'source_ref': f"{workflow_name} (id {wf_id}, v{server_row['publishedVersionNumber']}) on {st.session_state.server_url}",
-                            'owner': server_row['ownerName'],
-                            # Kept so the workspace can be checked for newer published versions later
-                            'server_version': server_sync.version_text(server_row['publishedVersionNumber']),
-                            'server_url': server_sync.normalize_url(st.session_state.server_url),
-                        })
+                        workflow_meta.update(server_sync.download_meta(server_row, connected_url))
                         file_name = os.path.basename(yxmd_path)
                         stored_name = db.log_workflow_details(st.session_state.workspace, file_name, tools_list, connections_list,
                                                               workflow_meta, server_workflow_id=wf_id)
@@ -282,8 +296,9 @@ if st.button("Process Local Files", disabled=not uploaded_files):
             failed_files.append(uploaded_file.name)
             continue
         workflow_meta['source'] = 'Local Upload'
-        # If this replaces a server download, its contents no longer match any server version
-        workflow_meta['server_version'] = None
+        # If this replaces a server download, its contents no longer match any server version.
+        # The server ID is kept, so the update check can still offer the server's version.
+        workflow_meta.update({'server_version': None, 'source_ref': None})
         if db.log_workflow_details(st.session_state.workspace, uploaded_file.name, tools_list, connections_list, workflow_meta) is None:
             failed_files.append(uploaded_file.name)
         del tools_list, connections_list

@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
 import database_manager as db
+import shared
 
 if 'workspace' not in st.session_state:
     st.session_state.workspace = None
 
 st.set_page_config(layout="wide", page_title="DB Inspector")
+shared.create_sidebar()
 st.header("🕵️‍♂️ DB Inspector")
 
 if not st.session_state.get('workspace'):

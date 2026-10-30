@@ -1,9 +1,12 @@
 import pandas as pd
-from parser import extract_io_tools
-from database_manager import create_connection
+import streamlit as st
+from parser import extract_io_tools, lineage_key, wildcard_match
+from database_manager import create_connection, get_path_aliases
 
+@st.cache_data(show_spinner=False)
 def get_raw_io_list(workspace_name):
     """Fetches and parses all I/O, managing its own DB connection."""
+    aliases = get_path_aliases(workspace_name)
     conn = create_connection()
     if conn is None: return []
     
@@ -40,10 +43,12 @@ def get_raw_io_list(workspace_name):
     for i in inputs:
         i['io_type'] = 'input'
         i['tool_id'] = tool_id_map.get(i['tool_db_id'])
+        i['link_key'] = lineage_key(i, aliases)
         io_list.append(i)
     for o in outputs:
         o['io_type'] = 'output'
         o['tool_id'] = tool_id_map.get(o['tool_db_id'])
+        o['link_key'] = lineage_key(o, aliases)
         io_list.append(o)
         
     return io_list
@@ -53,15 +58,26 @@ def generate_impact_report(raw_io_list, view_by='Data Source'):
     if not raw_io_list: return pd.DataFrame()
 
     df = pd.DataFrame(raw_io_list)
-    df['source_detail'] = df['source_detail'].apply(lambda x: x.lower() if isinstance(x, str) else x)
+    # Group by the same key the lineage tracer uses; items without one (path not found, dynamic) can't be linked
+    df = df[df['link_key'].notna()].copy()
+    if df.empty: return pd.DataFrame()
+    df['source_detail'] = df['link_key']
     
-    inputs = df[df['io_type'] == 'input'].rename(columns={'workflow_name': 'Consuming Workflow', 'source_detail': 'Data Source'})
+    inputs = df[df['io_type'] == 'input'].rename(columns={'workflow_name': 'Consuming Workflow', 'source_detail': 'Data Source'})[['Data Source', 'Consuming Workflow']]
+    outputs = df[df['io_type'] == 'output'].rename(columns={'workflow_name': 'Producing Workflow', 'source_detail': 'Data Source'})[['Data Source', 'Producing Workflow']].drop_duplicates()
+
+    # A wildcard input (e.g. gl_*.csv) also consumes every output it matches
+    written = outputs['Data Source'].unique()
+    wildcard_reads = [{'Data Source': key, 'Consuming Workflow': row['Consuming Workflow']}
+                      for row in inputs.to_dict('records') if '*' in row['Data Source'] or '?' in row['Data Source']
+                      for key in written if key != row['Data Source'] and wildcard_match(row['Data Source'], key)]
+    if wildcard_reads:
+        inputs = pd.concat([inputs, pd.DataFrame(wildcard_reads)], ignore_index=True)
+
     consumer_agg = inputs.groupby('Data Source').agg(
         NumberOfConsumers=('Consuming Workflow', 'nunique'),
         ConsumingWorkflows=('Consuming Workflow', lambda x: list(x.unique()))
     ).reset_index()
-
-    outputs = df[df['io_type'] == 'output'].rename(columns={'workflow_name': 'Producing Workflow', 'source_detail': 'Data Source'})[['Data Source', 'Producing Workflow']].drop_duplicates()
     all_sources = pd.DataFrame({'Data Source': pd.concat([inputs['Data Source'], outputs['Data Source']]).unique()})
 
     report_df = pd.merge(all_sources, outputs, on='Data Source', how='left')

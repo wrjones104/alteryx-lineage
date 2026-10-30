@@ -1,0 +1,137 @@
+<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2022.1">
+  <Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="54" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File OutputFileName="" FileFormat="19">S:\staging\GL_Clean.yxdb</File>
+        </Configuration>
+        <Annotation DisplayMode="0"><Name /><DefaultAnnotationText>GL_Clean.yxdb</DefaultAnnotationText><Left value="False" /></Annotation>
+        <MetaInfo connection="Output">
+          <RecordInfo>
+            <Field name="Account" size="254" type="V_String" />
+            <Field name="Amount" type="Double" />
+          </RecordInfo>
+        </MetaInfo>
+      </Properties>
+    </Node>
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="54" y="150" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File OutputFileName="" FileFormat="25">\\FileServer\Finance\reports\GL Summary.xlsx|||`Summary$`</File>
+        </Configuration>
+        <Annotation DisplayMode="0"><Name /><DefaultAnnotationText>GL Summary.xlsx</DefaultAnnotationText><Left value="False" /></Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DynamicInput.DynamicInput">
+        <Position x="150" y="250" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <InputConfiguration>
+            <Configuration>
+              <File OutputFileName="" FileFormat="0">\\fileserver\finance\templates\budget_template.csv</File>
+            </Configuration>
+          </InputConfiguration>
+        </Configuration>
+      </Properties>
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="54" y="350" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File OutputFileName="" FileFormat="23">aka:Warehouse|||SELECT * FROM dbo.Accounts</File>
+        </Configuration>
+      </Properties>
+    </Node>
+    <Node ToolID="5">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput">
+        <Position x="300" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File MaxRecords="" FileFormat="0">output\final.csv</File>
+          <MultiFile value="True" />
+        </Configuration>
+      </Properties>
+    </Node>
+    <Node ToolID="6">
+      <GuiSettings>
+        <Position x="54" y="450" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <Value name="Drop Down (5)">\\fileserver\finance\reference\cost_centers.csv</Value>
+        </Configuration>
+      </Properties>
+      <EngineSettings Macro="Input Data Selector.yxmc" />
+    </Node>
+    <Node ToolID="7">
+      <GuiSettings>
+        <Position x="400" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration><Value name="Site">Finance</Value></Configuration>
+      </Properties>
+      <EngineSettings Macro="Macros\SharePointUpload.yxmc" />
+    </Node>
+    <Node ToolID="8">
+      <GuiSettings>
+        <Position x="400" y="150" />
+      </GuiSettings>
+      <Properties>
+        <Configuration><Value name="Columns">Account</Value></Configuration>
+      </Properties>
+      <EngineSettings Macro="Cleanse.yxmc" />
+    </Node>
+    <Node ToolID="9">
+      <GuiSettings Plugin="JupyterCode">
+        <Position x="400" y="250" />
+      </GuiSettings>
+      <Properties>
+        <Configuration><Notebook>pass</Notebook></Configuration>
+        <Annotation DisplayMode="0">
+          <Name />
+          <AnnotationText>Writes an export for treasury
+--- lineage ---
+outputs:
+  - type: file
+    path: \\fileserver\finance\exports\treasury.csv
+---</AnnotationText>
+          <Left value="False" />
+        </Annotation>
+      </Properties>
+    </Node>
+    <Node ToolID="10">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join">
+        <Position x="200" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration><SelectConfiguration /></Configuration>
+      </Properties>
+    </Node>
+  </Nodes>
+  <Connections>
+    <Connection><Origin ToolID="1" Connection="Output" /><Destination ToolID="10" Connection="Left" /></Connection>
+    <Connection><Origin ToolID="2" Connection="Output" /><Destination ToolID="10" Connection="Right" /></Connection>
+    <Connection><Origin ToolID="10" Connection="Join" /><Destination ToolID="5" Connection="Input" /></Connection>
+    <Connection><Origin ToolID="10" Connection="Join" /><Destination ToolID="7" Connection="Input" /></Connection>
+    <Connection><Origin ToolID="10" Connection="Join" /><Destination ToolID="9" Connection="Input" /></Connection>
+  </Connections>
+  <Properties>
+    <MetaInfo>
+      <Name>Report_GL</Name>
+      <Description />
+      <Author />
+    </MetaInfo>
+  </Properties>
+</AlteryxDocument>

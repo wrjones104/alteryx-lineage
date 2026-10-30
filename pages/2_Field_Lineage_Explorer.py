@@ -39,7 +39,7 @@ if active_tab == "Trace from a Source File":
     st.subheader("Trace a field forward from a source file")
     source_files = sorted([
         os.path.basename(k) for k, v in io_map.items()
-        if v.get('consumers') and not v.get('producer')
+        if v.get('consumers') and not v.get('producers')
         and not k.lower().strip().startswith('select')
         and '|||' not in k
         and not k.lower().strip().startswith('dynamic from template:')
@@ -75,7 +75,7 @@ if active_tab == "Trace from a Source File":
                     tool_db_id = selected_consumer['tool_db_id']
                     conn = db.create_connection()
                     try:
-                        fields_df = pd.read_sql_query("SELECT field_name FROM tool_fields WHERE tool_id = ? ORDER BY field_name", conn, params=(tool_db_id,))
+                        fields_df = db.get_tool_fields(conn, tool_db_id)
                         if fields_df.empty:
                             st.warning("Could not retrieve the field schema for this input tool.")
                         else:
@@ -138,7 +138,7 @@ elif active_tab == "Trace from a Tool":
                 selected_tool_display = st.selectbox("2. Select a starting tool:", options=[""] + list(tool_options.keys()))
                 if selected_tool_display:
                     tool_db_id = tool_options[selected_tool_display]
-                    fields_in_tool = pd.read_sql_query("SELECT field_name FROM tool_fields WHERE tool_id = ? ORDER BY field_name", conn, params=(tool_db_id,))
+                    fields_in_tool = db.get_tool_fields(conn, tool_db_id)
                     if not fields_in_tool.empty:
                         selected_field = st.selectbox("3. Select a field to trace:", options=[""] + list(fields_in_tool['field_name']))
                         col1, col2 = st.columns(2)
@@ -233,7 +233,7 @@ elif active_tab == "Search by Field Name":
         conn = db.create_connection()
         try:
             query = """
-                SELECT
+                SELECT DISTINCT
                     tf.field_name,
                     t.tool_id_xml,
                     t.plugin,

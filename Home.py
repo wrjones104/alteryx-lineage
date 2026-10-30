@@ -6,11 +6,11 @@ import server_client
 import gc
 import time
 import os
+import shutil
 import shared
 
-# --- Page Config and DB Setup ---
+# --- Page Config ---
 st.set_page_config(layout="wide", page_title="Manage Data")
-db.create_tables()
 
 # --- Session State Initialization ---
 if 'workspace' not in st.session_state:
@@ -58,12 +58,16 @@ st.write(f"Managing data for workspace: **{st.session_state.workspace}**")
 with st.expander("🔗 Connect to Alteryx Server to Download Workflows"):
     saved_connections = db.load_connections()
     if saved_connections:
-        saved_conn_name = st.selectbox("Load Saved Connection", options=[""] + list(saved_connections.keys()))
-        if saved_conn_name:
-            conn_details = saved_connections[saved_conn_name]
-            st.session_state.server_url = conn_details['url']
-            st.session_state.client_id = conn_details['client_id']
-            st.session_state.client_secret = conn_details['client_secret']
+        def apply_saved_connection():
+            # Fill the fields only when the selection changes, so typing over them (e.g. a secret
+            # that wasn't saved) isn't undone on the next rerun
+            conn_details = saved_connections.get(st.session_state.get('saved_conn_selector'))
+            if conn_details:
+                st.session_state.server_url = conn_details['url']
+                st.session_state.client_id = conn_details['client_id']
+                st.session_state.client_secret = conn_details['client_secret']
+        st.selectbox("Load Saved Connection", options=[""] + list(saved_connections.keys()),
+                     key='saved_conn_selector', on_change=apply_saved_connection)
 
     st.text_input("Server URL", key="server_url")
     st.text_input("Client ID", key="client_id")
@@ -90,8 +94,14 @@ with st.expander("🔗 Connect to Alteryx Server to Download Workflows"):
         save_conn_name = st.text_input("Save connection as:")
         if st.button("Save Current Connection"):
             if save_conn_name and st.session_state.get('server_url') and st.session_state.get('client_id') and st.session_state.get('client_secret'):
-                db.save_connection(save_conn_name, st.session_state.server_url, st.session_state.client_id, st.session_state.client_secret)
-                st.success(f"Connection '{save_conn_name}' saved!")
+                saved, secret_stored = db.save_connection(save_conn_name, st.session_state.server_url, st.session_state.client_id, st.session_state.client_secret)
+                if not saved:
+                    st.error(f"Could not save connection '{save_conn_name}'.")
+                elif secret_stored:
+                    st.success(f"Connection '{save_conn_name}' saved! The client secret is kept in your system's credential store.")
+                else:
+                    st.warning(f"Connection '{save_conn_name}' saved without its client secret (no system credential store "
+                               "is available). You'll need to enter the secret each time.")
             else:
                 st.warning("Please provide a name and fill in all credential fields to save.")
 
@@ -153,21 +163,49 @@ if st.session_state.get('workflows_to_download'):
     total_files = len(workflow_ids)
     progress_bar = st.progress(0, "Starting...")
     temp_dir = "temp_downloads"
+    failed_files, renamed_files = [], []
     try:
         for i, wf_id in enumerate(workflow_ids):
             if st.session_state.get('cancel_download'):
                 st.warning("Operation cancelled by user.")
                 break
-            workflow_name = st.session_state.workflow_df.loc[st.session_state.workflow_df['id'] == wf_id, 'name'].iloc[0]
+            server_row = st.session_state.workflow_df.loc[st.session_state.workflow_df['id'] == wf_id].iloc[0]
+            workflow_name = server_row['name']
             progress_bar.progress(i / total_files, text=f"({i+1}/{total_files}) Downloading: {workflow_name}...")
             yxmd_path = server_client.download_and_unpack_workflow(st.session_state.server_url, st.session_state.session_key, wf_id, temp_dir)
             if yxmd_path:
-                progress_bar.progress((i + 0.5) / total_files, text=f"({i+1}/{total_files}) Parsing: {os.path.basename(yxmd_path)}...")
-                tools_list, connections_list, _ = parse_workflow(yxmd_path)
-                db.log_workflow_details(st.session_state.workspace, os.path.basename(yxmd_path), tools_list, connections_list)
-                os.remove(yxmd_path)
-                del tools_list, connections_list
-                gc.collect()
+                try:
+                    progress_bar.progress((i + 0.5) / total_files, text=f"({i+1}/{total_files}) Parsing: {os.path.basename(yxmd_path)}...")
+                    tools_list, connections_list, workflow_meta = parse_workflow(yxmd_path)
+                    if tools_list is None:
+                        failed_files.append(workflow_name)
+                    else:
+                        workflow_meta.update({
+                            'source': 'Alteryx Server',
+                            'source_ref': f"{workflow_name} (id {wf_id}, v{server_row['publishedVersionNumber']}) on {st.session_state.server_url}",
+                            'owner': server_row['ownerName'],
+                        })
+                        file_name = os.path.basename(yxmd_path)
+                        stored_name = db.log_workflow_details(st.session_state.workspace, file_name, tools_list, connections_list,
+                                                              workflow_meta, server_workflow_id=wf_id)
+                        if stored_name is None:
+                            failed_files.append(workflow_name)
+                        elif stored_name != file_name:
+                            renamed_files.append(f"'{workflow_name}' saved as '{stored_name}'")
+                    del tools_list, connections_list
+                    gc.collect()
+                finally:
+                    # Each download is unpacked into its own folder
+                    shutil.rmtree(os.path.dirname(yxmd_path), ignore_errors=True)
+            else:
+                failed_files.append(workflow_name)
+        if failed_files:
+            st.error(f"Could not download or parse {len(failed_files)} workflow(s): {', '.join(failed_files)}")
+        if renamed_files:
+            st.warning("Another workflow in this workspace already uses the same file name, so these were saved "
+                       f"under a unique name: {'; '.join(renamed_files)}")
+        if failed_files or renamed_files:
+            time.sleep(5)
         if not st.session_state.get('cancel_download'):
             progress_bar.progress(1.0, "Processing complete!")
             st.success("All selected workflows have been processed.")
@@ -182,25 +220,35 @@ st.markdown("---")
 
 # --- Local Upload Section ---
 st.subheader("Upload Local Workflows")
-uploaded_files = st.file_uploader("Upload .yxmd files from your computer", type="yxmd", accept_multiple_files=True, key='file_uploader_key')
+uploaded_files = st.file_uploader("Upload workflows (.yxmd) or analytic apps (.yxwz) from your computer", type=["yxmd", "yxwz"], accept_multiple_files=True, key='file_uploader_key')
 
 if st.button("Process Local Files", disabled=not uploaded_files):
     total_files = len(uploaded_files)
     st.info("Processing local files...")
     progress_bar = st.progress(0)
+    failed_files = []
     for i, uploaded_file in enumerate(uploaded_files):
         progress_text = f"Analyzing ({i+1}/{total_files}): {uploaded_file.name}"
         progress_bar.progress((i + 1) / total_files, text=progress_text)
         uploaded_file.seek(0)
-        tools_list, connections_list, _ = parse_workflow(uploaded_file)
-        db.log_workflow_details(st.session_state.workspace, uploaded_file.name, tools_list, connections_list)
+        tools_list, connections_list, workflow_meta = parse_workflow(uploaded_file)
+        if tools_list is None:
+            # Don't overwrite previously parsed data with an empty result
+            failed_files.append(uploaded_file.name)
+            continue
+        workflow_meta['source'] = 'Local Upload'
+        if db.log_workflow_details(st.session_state.workspace, uploaded_file.name, tools_list, connections_list, workflow_meta) is None:
+            failed_files.append(uploaded_file.name)
         del tools_list, connections_list
         gc.collect()
 
-    st.success("Local file processing complete!")
     st.cache_data.clear()
-    time.sleep(1)
-    st.rerun()
+    if failed_files:
+        st.error(f"Could not parse {len(failed_files)} file(s): {', '.join(failed_files)}. They were skipped.")
+    else:
+        st.success("Local file processing complete!")
+        time.sleep(1)
+        st.rerun()
 
 st.markdown("---")
 

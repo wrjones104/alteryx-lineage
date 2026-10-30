@@ -1,18 +1,35 @@
 import os
+import re
+import shutil
+import tempfile
 import zipfile
 import requests
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
 
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 load_dotenv()
+
+try:
+    # Check certificates against the Windows/macOS certificate store, so a server signed by an
+    # internal company CA works without exporting a CA bundle.
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
+# To trust a specific CA file, set REQUESTS_CA_BUNDLE in .env. ALTERYX_SSL_VERIFY=false turns
+# checking off entirely; use it only as a last resort (e.g. an expired internal certificate).
+VERIFY_SSL = os.getenv("ALTERYX_SSL_VERIFY", "true").strip().lower() not in ("false", "0", "no")
+if not VERIFY_SSL:
+    print("WARNING: ALTERYX_SSL_VERIFY is off; Alteryx Server certificates will not be checked.")
+# (connect, read) seconds, so a stalled server can't hang the page
+REQUEST_TIMEOUT = (10, 120)
 
 def get_session_key(base_url, client_id, client_secret):
     """Authenticates with the Alteryx Server API to get a session key."""
-    token_url = f"{base_url}/webapi/oauth2/token"
+    token_url = f"{base_url.rstrip('/')}/webapi/oauth2/token"
     payload = {'grant_type': 'client_credentials', 'client_id': client_id, 'client_secret': client_secret}
     try:
-        response = requests.post(token_url, data=payload, verify=False)
+        response = requests.post(token_url, data=payload, verify=VERIFY_SSL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.json().get('access_token')
     except requests.exceptions.RequestException as e:
@@ -32,10 +49,10 @@ def get_user_map(base_url):
         print("Failed to get admin session key.")
         return {}
 
-    users_url = f"{base_url}/webapi/v3/users"
+    users_url = f"{base_url.rstrip('/')}/webapi/v3/users"
     headers = {'Authorization': f'Bearer {admin_s_key}'}
     try:
-        response = requests.get(users_url, headers=headers, verify=False)
+        response = requests.get(users_url, headers=headers, verify=VERIFY_SSL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         users_list = response.json()
         user_map = {user['id']: f"{user.get('firstName', '')} {user.get('lastName', '')}".strip() for user in users_list}
@@ -49,10 +66,10 @@ def get_workflows(base_url, session_key):
     """Fetches all workflows accessible to the user, including extra metadata."""
     user_map = get_user_map(base_url)
     headers = {'Authorization': f'Bearer {session_key}'}
-    workflows_url = f"{base_url}/webapi/v3/workflows"
-    
+    workflows_url = f"{base_url.rstrip('/')}/webapi/v3/workflows"
+
     try:
-        response = requests.get(workflows_url, headers=headers, verify=False)
+        response = requests.get(workflows_url, headers=headers, verify=VERIFY_SSL, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         workflows_list = response.json()
         if not isinstance(workflows_list, list):
@@ -81,37 +98,47 @@ def get_workflows(base_url, session_key):
 
 def download_and_unpack_workflow(base_url, session_key, workflow_id, download_dir):
     """
-    Downloads a packaged workflow (.yxzp), unpacks it, and returns the path to the .yxmd file.
+    Downloads a packaged workflow (.yxzp) and unpacks its main workflow into a new folder of its own
+    inside download_dir. Returns the path to the .yxmd/.yxwz file; the caller deletes its folder
+    (os.path.dirname of the path) when done. Returns None on failure.
     """
-    download_url = f"{base_url}/webapi/v3/workflows/{workflow_id}/package"
+    download_url = f"{base_url.rstrip('/')}/webapi/v3/workflows/{workflow_id}/package"
     headers = {'Authorization': f'Bearer {session_key}'}
-    yxzp_path = os.path.join(download_dir, f"{workflow_id}.yxzp")
-    unpacked_path = None
-    
+    os.makedirs(download_dir, exist_ok=True)
+    # A folder per download, so two sessions downloading 'Workflow.yxmd' at once don't collide
+    safe_id = re.sub(r'[^\w.-]', '_', str(workflow_id))
+    work_dir = tempfile.mkdtemp(prefix=f"{safe_id}_", dir=download_dir)
+    yxzp_path = os.path.join(work_dir, "package.yxzp")
+
     try:
-        os.makedirs(download_dir, exist_ok=True)
-        
-        with requests.get(download_url, headers=headers, stream=True, verify=False) as r:
+        with requests.get(download_url, headers=headers, stream=True, verify=VERIFY_SSL, timeout=REQUEST_TIMEOUT) as r:
             r.raise_for_status()
             with open(yxzp_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-            
-        with zipfile.ZipFile(yxzp_path, 'r') as zip_ref:
-            for file_info in zip_ref.infolist():
-                if file_info.filename.endswith('.yxmd'):
-                    zip_ref.extract(file_info, download_dir)
-                    unpacked_path = os.path.join(download_dir, file_info.filename)
-                    break
-        
-        if yxzp_path and os.path.exists(yxzp_path):
-            os.remove(yxzp_path)
 
+        unpacked_path = None
+        with zipfile.ZipFile(yxzp_path, 'r') as zip_ref:
+            candidates = [f for f in zip_ref.infolist()
+                          if not f.is_dir() and f.filename.lower().endswith(('.yxmd', '.yxwz'))]
+            # Packages can bundle dependent workflows in subfolders; the main one is at the top level.
+            candidates.sort(key=lambda f: f.filename.replace('\\', '/').count('/'))
+            for candidate in candidates:
+                # Only the file name is used, so an entry like '../x.yxmd' or 'C:\\x.yxmd' can't point outside work_dir
+                name = os.path.basename(candidate.filename.replace('\\', '/'))
+                if name in ('', '.', '..'): continue
+                unpacked_path = os.path.join(work_dir, name)
+                with zip_ref.open(candidate) as src, open(unpacked_path, 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                break
+        # Removed after the archive is closed (Windows can't delete an open file)
+        os.remove(yxzp_path)
+        if unpacked_path is None:
+            shutil.rmtree(work_dir, ignore_errors=True)
         return unpacked_path
 
     except Exception as e:
         print(f"Failed to download or unpack workflow {workflow_id}: {e}")
-        if os.path.exists(yxzp_path):
-            os.remove(yxzp_path)
+        shutil.rmtree(work_dir, ignore_errors=True)
         return None
 

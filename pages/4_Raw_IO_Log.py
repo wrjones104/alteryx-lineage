@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
 import reports
+import shared
 
 if 'workspace' not in st.session_state:
     st.session_state.workspace = None
 
 st.set_page_config(layout="wide", page_title="Raw I/O Log")
+shared.create_sidebar()
 st.header("🗂️ Raw I/O Log")
 
 if not st.session_state.get('workspace'):

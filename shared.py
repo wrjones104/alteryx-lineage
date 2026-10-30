@@ -9,8 +9,15 @@ def on_workspace_select():
     st.cache_data.clear()
     st.cache_resource.clear()
 
+@st.cache_resource
+def _ensure_schema():
+    # Every page builds the sidebar, so the database is migrated whichever page is opened first
+    db.create_tables()
+    return True
+
 def create_sidebar():
     """Creates the shared sidebar for all pages."""
+    _ensure_schema()
     st.sidebar.title("Workspace")
     workspace_list = db.get_all_workspaces()
     options = [""] + workspace_list

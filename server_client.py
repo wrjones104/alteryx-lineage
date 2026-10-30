@@ -98,11 +98,12 @@ def download_and_unpack_workflow(base_url, session_key, workflow_id, download_di
                     f.write(chunk)
             
         with zipfile.ZipFile(yxzp_path, 'r') as zip_ref:
-            for file_info in zip_ref.infolist():
-                if file_info.filename.endswith('.yxmd'):
-                    zip_ref.extract(file_info, download_dir)
-                    unpacked_path = os.path.join(download_dir, file_info.filename)
-                    break
+            candidates = [f for f in zip_ref.infolist() if f.filename.lower().endswith(('.yxmd', '.yxwz'))]
+            # Packages can bundle dependent workflows in subfolders; the main one is at the top level.
+            candidates.sort(key=lambda f: f.filename.replace('\\', '/').count('/'))
+            if candidates:
+                zip_ref.extract(candidates[0], download_dir)
+                unpacked_path = os.path.join(download_dir, candidates[0].filename)
         
         if yxzp_path and os.path.exists(yxzp_path):
             os.remove(yxzp_path)

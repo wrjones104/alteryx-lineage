@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.TextInput.TextInput">
+        <Position x="54" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration><Fields><Field name="Account" /></Fields><Data><r><c>1000</c></r></Data></Configuration>
+        <MetaInfo connection="Output">
+          <RecordInfo><Field name="Account" size="254" type="V_String" /></RecordInfo>
+        </MetaInfo>
+      </Properties>
+    </Node>
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput">
+        <Position x="150" y="54" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File MaxRecords="" FileFormat="0">\\fileserver\finance\raw\gl_20261030.csv</File>
+          <MultiFile value="False" />
+        </Configuration>
+      </Properties>
+    </Node>
+  </Nodes>
+  <Connections>
+    <Connection><Origin ToolID="1" Connection="Output" /><Destination ToolID="2" Connection="Input" /></Connection>
+  </Connections>
+  <Properties><MetaInfo><Name>Daily_Feed</Name></MetaInfo></Properties>
+</AlteryxDocument>

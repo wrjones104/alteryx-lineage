@@ -1,8 +1,8 @@
 import pandas as pd
 from lxml import etree as ET
 from collections import deque
-from parser import extract_io_tools
-from database_manager import create_connection
+from parser import extract_io_tools, lineage_key
+from database_manager import create_connection, get_path_aliases
 import os
 import streamlit as st
 
@@ -87,8 +87,10 @@ def find_destination_field_name(config_xml, plugin, origin_field_name):
         return origin_field_name
     return origin_field_name
 
+@st.cache_data(show_spinner=False)
 def build_io_map(workspace_name):
     """Builds a map of all data sources, detailing which tools produce and consume them."""
+    aliases = get_path_aliases(workspace_name)
     conn = create_connection()
     if conn is None: return {}
     
@@ -115,12 +117,8 @@ def build_io_map(workspace_name):
         tools_list_for_parser = all_tools_df.to_dict('records')
         inputs, outputs = extract_io_tools(tools_list_for_parser)
 
-        def normalize_path(p):
-            if not p or not isinstance(p, str): return ""
-            return os.path.normcase(os.path.normpath(p))
-
         for item in outputs:
-            path = normalize_path(item['source_detail'])
+            path = lineage_key(item, aliases)
             if not path: continue
             if path not in io_map: io_map[path] = {'producer': None, 'consumers': []}
             io_map[path]['producer'] = {
@@ -130,7 +128,7 @@ def build_io_map(workspace_name):
             }
 
         for item in inputs:
-            path = normalize_path(item['source_detail'])
+            path = lineage_key(item, aliases)
             if not path: continue
             if path not in io_map: io_map[path] = {'producer': None, 'consumers': []}
             io_map[path]['consumers'].append({
@@ -149,6 +147,7 @@ def trace_upstream_end_to_end(workspace_name, start_workflow_id, start_tool_id, 
     if not conn: return pd.DataFrame()
 
     full_lineage = []
+    aliases = get_path_aliases(workspace_name)
     
     queue = deque([(start_workflow_id, start_tool_id, start_field_name)])
     visited = set()
@@ -173,7 +172,7 @@ def trace_upstream_end_to_end(workspace_name, start_workflow_id, start_tool_id, 
                 full_lineage.insert(0, step)
 
             if origin and origin['type'] == 'INPUT' and origin.get('source_detail'):
-                normalized_path = os.path.normcase(os.path.normpath(origin['source_detail']))
+                normalized_path = lineage_key(origin.get('io_item'), aliases)
                 if normalized_path in io_map and io_map[normalized_path].get('producer'):
                     producer = io_map[normalized_path]['producer']
                     full_lineage.insert(0, {
@@ -196,6 +195,7 @@ def trace_downstream_end_to_end(workspace_name, start_workflow_id, start_tool_id
     if not conn: return pd.DataFrame()
 
     final_endpoints = []
+    aliases = get_path_aliases(workspace_name)
     
     queue = deque([(start_workflow_id, start_tool_id, start_field_name)])
     visited = set()
@@ -221,7 +221,7 @@ def trace_downstream_end_to_end(workspace_name, start_workflow_id, start_tool_id
 
             for cont in continuations:
                 if not cont.get('source_detail'): continue
-                normalized_path = os.path.normcase(os.path.normpath(cont['source_detail']))
+                normalized_path = lineage_key(cont.get('io_item'), aliases)
                 if normalized_path in io_map and io_map[normalized_path].get('consumers'):
                     for consumer in io_map[normalized_path]['consumers']:
                         queue.append((consumer['workflow_db_id'], consumer['tool_db_id'], cont['field_name']))
@@ -254,7 +254,7 @@ def _trace_within_workflow(conn, workflow_id, start_tool_id, start_field_name):
                 'annotation': tool_info['annotation']
             }
             inputs, _ = extract_io_tools([tool_dict])
-            origin_details = {'type': 'INPUT', 'source_detail': inputs[0]['source_detail'] if inputs else 'Unknown', 'field_name': current_field_name}
+            origin_details = {'type': 'INPUT', 'source_detail': inputs[0]['source_detail'] if inputs else 'Unknown', 'field_name': current_field_name, 'io_item': inputs[0] if inputs else None}
             break
 
         origin_df = pd.read_sql_query("SELECT origin_tool_id_xml FROM connections WHERE workflow_id = ? AND destination_tool_id_xml = ?", conn, params=(workflow_id, tool_info['tool_id_xml']))
@@ -308,7 +308,7 @@ def _trace_within_workflow_downstream(conn, wf_id, start_tool_db_id, start_field
             if outputs:
                 output_details = {'Final Field Name': field_name, 'Output Tool ID': tool_xml_id, 'Destination': outputs[0]['source_detail']}
                 endpoints.append(output_details)
-                continuations.append({'source_detail': outputs[0]['source_detail'], 'field_name': field_name})
+                continuations.append({'source_detail': outputs[0]['source_detail'], 'field_name': field_name, 'io_item': outputs[0]})
             continue
 
         destination_df = pd.read_sql_query("SELECT destination_tool_id_xml FROM connections WHERE workflow_id = ? AND origin_tool_id_xml = ?", conn, params=(wf_id, tool_xml_id))

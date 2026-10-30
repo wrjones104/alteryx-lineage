@@ -8,6 +8,7 @@ from collections import deque
 
 DB_FILE = os.path.join("data", "lineage.db")
 CONNECTIONS_FILE = os.path.join("data", "connections.json")
+WORKFLOW_META_COLUMNS = ('source', 'source_ref', 'owner', 'description', 'author', 'alteryx_version')
 
 def load_connections():
     """Loads saved server connection details from a JSON file."""
@@ -81,6 +82,21 @@ def create_tables():
                 FOREIGN KEY (workflow_id) REFERENCES workflows (id)
             );
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS path_aliases (
+                id INTEGER PRIMARY KEY, workspace_id INTEGER NOT NULL, prefix TEXT NOT NULL, target TEXT NOT NULL,
+                FOREIGN KEY (workspace_id) REFERENCES workspaces (id)
+            );
+        """)
+        # Columns added after the first release; existing databases are migrated in place.
+        existing_columns = {row[1] for row in cursor.execute("PRAGMA table_info(workflows)")}
+        for column in WORKFLOW_META_COLUMNS:
+            if column not in existing_columns:
+                cursor.execute(f"ALTER TABLE workflows ADD COLUMN {column} TEXT")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tools_workflow ON tools (workflow_id, tool_id_xml)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_tool_fields_tool ON tool_fields (tool_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_connections_origin ON connections (workflow_id, origin_tool_id_xml)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_connections_destination ON connections (workflow_id, destination_tool_id_xml)")
         conn.commit()
     except Error as e:
         print(e)
@@ -169,7 +185,44 @@ def find_upstream_fields_for_tool(conn, workflow_db_id, start_tool_db_id):
     return pd.DataFrame()
 
 
-def log_workflow_details(workspace_name, workflow_name, tools_list, connections_list):
+def get_path_aliases(workspace_name):
+    """Returns the workspace's drive mappings as (prefix, target) tuples, longest prefix first."""
+    conn = create_connection()
+    if conn is None: return ()
+    try:
+        rows = conn.execute("""
+            SELECT pa.prefix, pa.target FROM path_aliases pa
+            JOIN workspaces ws ON pa.workspace_id = ws.id
+            WHERE ws.name = ? ORDER BY LENGTH(pa.prefix) DESC
+        """, (workspace_name,)).fetchall()
+        return tuple((prefix, target) for prefix, target in rows)
+    except Error as e:
+        print(f"Database error in get_path_aliases: {e}")
+        return ()
+    finally:
+        conn.close()
+
+def save_path_aliases(workspace_name, aliases):
+    """Replaces the workspace's drive mappings with the given (prefix, target) pairs."""
+    conn = create_connection()
+    if conn is None: return False
+    try:
+        workspace_id = _get_or_create_workspace_id(conn, workspace_name)
+        conn.execute("DELETE FROM path_aliases WHERE workspace_id = ?", (workspace_id,))
+        conn.executemany(
+            "INSERT INTO path_aliases (workspace_id, prefix, target) VALUES (?, ?, ?)",
+            [(workspace_id, prefix.strip(), target.strip()) for prefix, target in aliases if prefix and target]
+        )
+        conn.commit()
+        return True
+    except Error as e:
+        print(f"Database error in save_path_aliases: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def log_workflow_details(workspace_name, workflow_name, tools_list, connections_list, workflow_meta=None):
     conn = create_connection()
     if conn is None: return
     try:
@@ -184,6 +237,11 @@ def log_workflow_details(workspace_name, workflow_name, tools_list, connections_
             (workspace_id, workflow_name)
         )
         workflow_db_id = cursor.execute("SELECT id FROM workflows WHERE workspace_id = ? AND workflow_name = ?", (workspace_id, workflow_name)).fetchone()[0]
+        # Only overwrite metadata we were given, so a local re-upload keeps the server owner, etc.
+        meta = {k: v for k, v in (workflow_meta or {}).items() if k in WORKFLOW_META_COLUMNS and v is not None}
+        if meta:
+            assignments = ', '.join(f"{column} = ?" for column in meta)
+            cursor.execute(f"UPDATE workflows SET {assignments} WHERE id = ?", (*meta.values(), workflow_db_id))
         existing_tools_cursor = cursor.execute("SELECT id FROM tools WHERE workflow_id = ?", (workflow_db_id,))
         existing_tool_ids = [row[0] for row in existing_tools_cursor.fetchall()]
         if existing_tool_ids:
